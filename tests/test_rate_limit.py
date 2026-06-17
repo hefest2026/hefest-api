@@ -15,8 +15,8 @@ import json
 from collections.abc import AsyncIterator
 
 import fakeredis.aioredis
+import jwt
 import pytest
-from jose import jwt
 
 from hefest.config import settings
 from hefest.middleware.rate_limit import (

@@ -6,9 +6,9 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
+import jwt
 from fastapi import status
 from fastapi.responses import JSONResponse
-from jose import JWTError, jwt
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
@@ -147,7 +147,7 @@ def _verified_user_id(token: str | None) -> str | None:
             settings.jwt_secret,
             algorithms=[settings.jwt_algorithm],
         )
-    except JWTError:
+    except jwt.PyJWTError:
         return None
     sub = payload.get("sub")
     return str(sub) if sub else None
