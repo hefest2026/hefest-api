@@ -12,6 +12,9 @@ RUN uv sync --frozen --all-groups
 # Source is mounted as a volume in dev; copy here for production builds
 COPY . .
 
+RUN chmod +x /app/docker-entrypoint.sh
+
 EXPOSE 8000
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["uv", "run", "uvicorn", "hefest.main:app", "--host", "0.0.0.0", "--port", "8000"]
