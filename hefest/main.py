@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import AsyncGenerator, Awaitable
 from contextlib import asynccontextmanager
 from typing import Final
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Response, status
+from loguru import logger
 from pydantic import BaseModel
 from tortoise.contrib.fastapi import RegisterTortoise
 
 from hefest.config import TORTOISE_ORM, settings
+from hefest.logging import configure_logging
 
-logger: Final = logging.getLogger(__name__)
+configure_logging(settings)
 
 READY_CHECK_TIMEOUT: Final = 2.0
 """Per-dependency readiness check timeout in seconds."""
@@ -81,7 +82,7 @@ async def _check_dependency(name: str, probe: Awaitable[object]) -> str:
         await asyncio.wait_for(probe, timeout=READY_CHECK_TIMEOUT)
         return "ok"
     except Exception:
-        logger.warning("Readiness check failed for %s", name, exc_info=True)
+        logger.opt(exception=True).warning("Readiness check failed for {}", name)
         return "down"
 
 
