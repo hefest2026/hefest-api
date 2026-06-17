@@ -5,6 +5,7 @@ from typing import AsyncGenerator
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
+from pydantic import BaseModel
 from tortoise.contrib.fastapi import RegisterTortoise
 
 from hefest.config import TORTOISE_ORM, settings
@@ -33,18 +34,33 @@ app = FastAPI(
 )
 
 
-@app.get("/health", tags=["operational"])
-async def health() -> dict[str, str]:
+class HealthResponse(BaseModel):
+    """Liveness probe response."""
+
+    status: str
+    version: str
+
+
+class ReadyResponse(BaseModel):
+    """Readiness probe response."""
+
+    status: str
+    postgres: str
+    redis: str
+
+
+@app.get("/health", response_model=HealthResponse, tags=["operational"])
+async def health() -> HealthResponse:
     """Liveness probe — returns 200 unconditionally."""
-    return {"status": "ok"}
+    return HealthResponse(status="ok", version=app.version)
 
 
-@app.get("/ready", tags=["operational"])
-async def ready() -> dict[str, str]:
+@app.get("/ready", response_model=ReadyResponse, tags=["operational"])
+async def ready() -> ReadyResponse:
     """Readiness probe — checks Postgres and Redis connectivity."""
     from tortoise import Tortoise
 
     conn = Tortoise.get_connection("default")
     await conn.execute_query("SELECT 1")
     await app.state.redis.ping()
-    return {"status": "ok"}
+    return ReadyResponse(status="ok", postgres="ok", redis="ok")
