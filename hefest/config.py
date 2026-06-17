@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     # relay
     relay_poll_interval: float = 1.0
 
+    # trusted reverse proxies (ProxyHeadersMiddleware uses this list)
+    # set to the nginx container IP or CIDR in production
+    trusted_proxies: list[str] = ["127.0.0.1", "::1"]
+
     # rate limiting
     rate_limit_login_count: int = 10
     rate_limit_login_window: int = 60
