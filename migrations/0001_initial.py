@@ -1,16 +1,18 @@
-from tortoise import migrations
-from tortoise.migrations import operations as ops
 import functools
+from json import dumps, loads
+from uuid import uuid4
+
+from tortoise import fields, migrations
+from tortoise.fields.base import OnDelete
+from tortoise.indexes import Index
+from tortoise.migrations import operations as ops
+
 from hefest.models.event import EventStatus
 from hefest.models.notification_job import JobStatus
 from hefest.models.notification_log import DeliveryStatus
 from hefest.models.registration import RegistrationStatus
 from hefest.models.user import UserRole
-from json import dumps, loads
-from tortoise.fields.base import OnDelete
-from uuid import uuid4
-from tortoise import fields
-from tortoise.indexes import Index
+
 
 class Migration(migrations.Migration):
     initial = True

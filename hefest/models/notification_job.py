@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from tortoise import fields
 from tortoise.models import Model
+
+if TYPE_CHECKING:
+    from hefest.models.event import Event
 
 
 class JobStatus(StrEnum):
@@ -19,7 +23,7 @@ class NotificationJob(Model):
     """
 
     id = fields.UUIDField(primary_key=True)
-    event: fields.ForeignKeyRelation[Event] = fields.ForeignKeyField(  # type: ignore[name-defined]  # noqa: F821
+    event: fields.ForeignKeyRelation[Event] = fields.ForeignKeyField(
         "models.Event",
         related_name="notification_jobs",
         on_delete=fields.OnDelete.CASCADE,

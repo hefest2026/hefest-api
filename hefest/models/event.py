@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from tortoise import fields
 from tortoise.models import Model
+
+if TYPE_CHECKING:
+    from hefest.models.notification_job import NotificationJob
+    from hefest.models.registration import Registration
+    from hefest.models.user import User
 
 
 class EventStatus(StrEnum):
@@ -16,7 +22,7 @@ class Event(Model):
     """A school event created by an organizer."""
 
     id = fields.UUIDField(primary_key=True)
-    organizer: fields.ForeignKeyRelation[User] = fields.ForeignKeyField(  # type: ignore[name-defined]  # noqa: F821
+    organizer: fields.ForeignKeyRelation[User] = fields.ForeignKeyField(
         "models.User",
         related_name="events",
         on_delete=fields.OnDelete.CASCADE,
@@ -31,8 +37,8 @@ class Event(Model):
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
 
-    registrations: fields.ReverseRelation["Registration"]  # type: ignore[name-defined]  # noqa: F821
-    notification_jobs: fields.ReverseRelation["NotificationJob"]  # type: ignore[name-defined]  # noqa: F821
+    registrations: fields.ReverseRelation[Registration]
+    notification_jobs: fields.ReverseRelation[NotificationJob]
 
     class Meta:
         table = "events"
