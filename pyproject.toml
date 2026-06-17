@@ -9,7 +9,7 @@ dependencies = [
     "loguru>=0.7.3",
     "passlib[bcrypt]>=1.7.4",
     "pydantic-settings>=2.14.1",
-    "python-jose[cryptography]>=3.5.0",
+    "pyjwt[crypto]>=2.8.0",
     "redis>=8.0.0",
     "tortoise-orm>=1.1.7",
 ]
