@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -11,9 +12,22 @@ from tortoise.contrib.fastapi import RegisterTortoise
 from hefest.config import TORTOISE_ORM, settings
 
 
+async def _migrate() -> None:
+    """Run pending Tortoise migrations before accepting traffic."""
+    proc = await asyncio.create_subprocess_exec(
+        "uv", "run", "tortoise", "-c", "hefest.config.TORTOISE_ORM", "migrate",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Migrations failed:\n{stderr.decode()}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Initialise Tortoise ORM and Redis on startup; close on shutdown."""
+    """Run migrations, then initialise Tortoise ORM and Redis."""
+    await _migrate()
     async with RegisterTortoise(
         app,
         config=TORTOISE_ORM,
