@@ -1,0 +1,41 @@
+[project]
+name = "hefest-api"
+version = "0.1.0"
+description = "School Events & Notification Center — Hefest API"
+requires-python = ">=3.12"
+dependencies = [
+    "asyncpg>=0.31.0",
+    "fastapi[standard]>=0.137.1",
+    "passlib[bcrypt]>=1.7.4",
+    "pydantic-settings>=2.14.1",
+    "python-jose[cryptography]>=3.5.0",
+    "redis>=8.0.0",
+    "tortoise-orm>=1.1.7",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.15.17",
+    "ty>=0.0.49",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.tortoise-orm]
+connections.default = "asyncpg://hefest:hefest@localhost:5432/hefest_db"
+
+[tool.tortoise-orm.apps.models]
+models = ["hefest.models"]
+default_connection = "default"
+migrations = "migrations"
