@@ -4,6 +4,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from tortoise import fields
+from tortoise.indexes import PartialIndex
+from tortoise.migrations.constraints import UniqueConstraint
 from tortoise.models import Model
 
 if TYPE_CHECKING:
@@ -18,12 +20,7 @@ class RegistrationStatus(StrEnum):
 
 
 class Registration(Model):
-    """A student's registration for an event.
-
-    The partial unique index ``uq_one_active_registration_per_student`` is
-    defined in the migration — Tortoise ORM does not yet emit partial indexes
-    from the model Meta, so it is added manually in the initial migration.
-    """
+    """A student's registration for an event."""
 
     id = fields.UUIDField(primary_key=True)
     event: fields.ForeignKeyRelation[Event] = fields.ForeignKeyField(
@@ -45,4 +42,16 @@ class Registration(Model):
         indexes = [
             ("event_id", "status"),
             ("student_id",),
+            PartialIndex(
+                fields=["event_id", "registered_at"],
+                name="idx_registrations_waitlist_fifo",
+                condition={"status": "waitlisted"},
+            ),
+        ]
+        constraints = [
+            UniqueConstraint(
+                fields=("event_id", "student_id"),
+                name="uq_one_active_registration_per_student",
+                condition="status IN ('confirmed', 'waitlisted')",
+            ),
         ]
