@@ -5,7 +5,6 @@ description = "School Events & Notification Center — Hefest API"
 requires-python = ">=3.12"
 dependencies = [
     "asyncpg>=0.31.0",
-    "fakeredis>=2.36.2",
     "fastapi[standard]>=0.137.1",
     "loguru>=0.7.3",
     "passlib[bcrypt]>=1.7.4",
@@ -17,6 +16,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "fakeredis[lua]>=2.36.2",
     "httpx>=0.28.1",
     "pytest>=9.1.0",
     "pytest-asyncio>=1.4.0",

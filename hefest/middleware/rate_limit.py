@@ -57,62 +57,63 @@ return {1, retry_after}
 @dataclass(frozen=True)
 class _Rule:
     methods: frozenset[str]
-    path_re: re.Pattern[str] | None
-    path_exact: str | None
     identifier: Literal["ip", "user"]
     tag: str
     limit: int
     window: int
+    path_exact: str | None = None
+    path_re: re.Pattern[str] | None = None
+    fallback: bool = False
 
     def matches(self, method: str, path: str) -> bool:
         if method not in self.methods:
             return False
+        if self.fallback:
+            return True
         if self.path_exact is not None:
             return path == self.path_exact
         if self.path_re is not None:
-            return bool(self.path_re.match(path))
+            return self.path_re.match(path) is not None
         return False
 
 
+# Ordered most-specific first; the trailing fallback rule matches anything that
+# no specific rule claimed, so dispatch() can resolve every request to exactly
+# one rule with a single first-match lookup.
 _RULES: Final[list[_Rule]] = [
     _Rule(
         methods=frozenset({"POST"}),
-        path_re=None,
         path_exact="/login",
         identifier="ip",
         tag="login",
         limit=settings.rate_limit_login_count,
-        window=settings.rate_limit_login_window,
+        window=settings.rate_limit_login_window_seconds,
     ),
     _Rule(
         methods=frozenset({"POST"}),
-        path_re=None,
         path_exact="/register",
         identifier="ip",
         tag="register",
         limit=settings.rate_limit_register_count,
-        window=settings.rate_limit_register_window,
+        window=settings.rate_limit_register_window_seconds,
     ),
     _Rule(
         methods=frozenset({"POST"}),
         path_re=_EVENTS_REGISTER_RE,
-        path_exact=None,
         identifier="user",
         tag="event_register",
         limit=settings.rate_limit_event_register_count,
-        window=settings.rate_limit_event_register_window,
+        window=settings.rate_limit_event_register_window_seconds,
+    ),
+    _Rule(
+        methods=frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}),
+        identifier="ip",
+        tag="global",
+        limit=settings.rate_limit_global_count,
+        window=settings.rate_limit_global_window_seconds,
+        fallback=True,
     ),
 ]
-
-_GLOBAL_RULE: Final = _Rule(
-    methods=frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}),
-    path_re=None,
-    path_exact=None,
-    identifier="ip",
-    tag="global",
-    limit=settings.rate_limit_global_count,
-    window=settings.rate_limit_global_window,
-)
 
 
 def _client_ip(request: Request) -> str:
@@ -178,8 +179,9 @@ async def _check(
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Sliding-window rate limiter backed by Redis sorted sets.
 
-    Checks specific per-route limits first, then falls back to the global limit.
-    Returns 429 with a ``Retry-After`` header when a limit is exceeded.
+    Resolves each request to the first matching rule (most-specific first, with a
+    trailing fallback rule that matches anything) and enforces that one limit.
+    Returns 429 with a ``Retry-After`` header when the limit is exceeded.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -193,28 +195,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         method = request.method
         path = request.url.path
 
-        # Determine which rule applies (first match wins, then global).
-        matched: _Rule | None = next(
-            (r for r in _RULES if r.matches(method, path)), None
-        )
+        # The fallback rule matches any method it lists, so a rule is resolved
+        # for every request the limiter governs.
+        rule = next((r for r in _RULES if r.matches(method, path)), None)
+        if rule is None:
+            return await call_next(request)
 
-        async def _run_check(rule: _Rule) -> tuple[bool, int]:
-            if rule.identifier == "user":
-                uid = _verified_user_id(_bearer_token(request))
-                identifier = f"user:{uid}" if uid else f"ip:{_client_ip(request)}"
-            else:
-                identifier = f"ip:{_client_ip(request)}"
-            key = f"{RATELIMIT_PREFIX}:{rule.tag}:{identifier}"
-            return await _check(script, redis, key, rule.limit, rule.window)
+        if rule.identifier == "user":
+            uid = _verified_user_id(_bearer_token(request))
+            identifier = f"user:{uid}" if uid else f"ip:{_client_ip(request)}"
+        else:
+            identifier = f"ip:{_client_ip(request)}"
+        key = f"{RATELIMIT_PREFIX}:{rule.tag}:{identifier}"
 
-        # Specific rule check.
-        if matched is not None:
-            limited, retry_after = await _run_check(matched)
-            if limited:
-                return _too_many(retry_after)
-
-        # Global fallback check.
-        limited, retry_after = await _run_check(_GLOBAL_RULE)
+        limited, retry_after = await _check(script, redis, key, rule.limit, rule.window)
         if limited:
             return _too_many(retry_after)
 
