@@ -1,0 +1,49 @@
+# Multi-stage production image for hefest-api.
+#
+# Differs from the dev Dockerfile: installs runtime dependencies only (no dev
+# group), copies source into the image instead of expecting a volume mount, and
+# runs as a non-root user. The shared docker-entrypoint.sh still runs migrations
+# via `uv run`, so uv is kept in the runtime stage but configured to never touch
+# the prebuilt venv (UV_NO_SYNC).
+
+FROM python:3.12-slim AS builder
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+WORKDIR /app
+
+RUN pip install uv --no-cache-dir
+
+# Install runtime deps first (cached layer) without the project for better caching.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Add the source and install the project itself against the locked deps.
+COPY . .
+RUN uv sync --frozen --no-dev
+
+
+FROM python:3.12-slim AS runtime
+
+# uv is required by the shared entrypoint's `uv run`; UV_NO_SYNC keeps it from
+# mutating the venv at runtime so startup is offline and deterministic.
+RUN pip install uv --no-cache-dir \
+    && useradd --create-home --uid 1000 hefest
+
+ENV UV_FROZEN=1 \
+    UV_NO_SYNC=1 \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+
+COPY --from=builder --chown=hefest:hefest /app /app
+
+RUN chmod +x /app/docker-entrypoint.sh
+
+USER hefest
+
+EXPOSE 8000
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD ["uv", "run", "uvicorn", "hefest.main:app", "--host", "0.0.0.0", "--port", "8000"]
