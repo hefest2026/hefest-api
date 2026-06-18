@@ -4,8 +4,9 @@ from uuid import uuid4
 
 from tortoise import fields, migrations
 from tortoise.fields.base import OnDelete
-from tortoise.indexes import Index
+from tortoise.indexes import Index, PartialIndex
 from tortoise.migrations import operations as ops
+from tortoise.migrations.constraints import UniqueConstraint
 
 from hefest.models.event import EventStatus
 from hefest.models.notification_job import JobStatus
@@ -28,7 +29,7 @@ class Migration(migrations.Migration):
                 ('created_at', fields.DatetimeField(auto_now=False, auto_now_add=True)),
                 ('updated_at', fields.DatetimeField(auto_now=True, auto_now_add=False)),
             ],
-            options={'table': 'notification_log', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Delivery log written by the C++ worker.'},
+            options={'table': 'notification_log', 'app': 'models', 'indexes': [PartialIndex(fields=['idempotency_key'], name='idx_log_processing', condition={'status': 'processing'})], 'pk_attr': 'id', 'table_description': 'Delivery log written by the C++ worker.'},
             bases=['Model'],
         ),
         ops.CreateModel(
@@ -59,7 +60,7 @@ class Migration(migrations.Migration):
                 ('created_at', fields.DatetimeField(auto_now=False, auto_now_add=True)),
                 ('updated_at', fields.DatetimeField(auto_now=True, auto_now_add=False)),
             ],
-            options={'table': 'events', 'app': 'models', 'indexes': [Index(fields=['organizer_id'])], 'pk_attr': 'id', 'table_description': 'A school event created by an organizer.'},
+            options={'table': 'events', 'app': 'models', 'indexes': [Index(fields=['organizer_id']), PartialIndex(fields=['status'], name='idx_events_published', condition={'status': 'published'})], 'pk_attr': 'id', 'table_description': 'A school event created by an organizer.'},
             bases=['Model'],
         ),
         ops.CreateModel(
@@ -74,7 +75,7 @@ class Migration(migrations.Migration):
                 ('created_at', fields.DatetimeField(auto_now=False, auto_now_add=True)),
                 ('updated_at', fields.DatetimeField(auto_now=True, auto_now_add=False)),
             ],
-            options={'table': 'notification_jobs', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Transactional outbox row — bridges DB writes to Redis Streams.'},
+            options={'table': 'notification_jobs', 'app': 'models', 'indexes': [PartialIndex(fields=['id'], name='idx_jobs_pending', condition={'status': 'pending'})], 'pk_attr': 'id', 'table_description': 'Transactional outbox row — bridges DB writes to Redis Streams.'},
             bases=['Model'],
         ),
         ops.CreateModel(
@@ -87,37 +88,7 @@ class Migration(migrations.Migration):
                 ('registered_at', fields.DatetimeField(auto_now=False, auto_now_add=True)),
                 ('cancelled_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=False)),
             ],
-            options={'table': 'registrations', 'app': 'models', 'indexes': [Index(fields=['event_id', 'status']), Index(fields=['student_id'])], 'pk_attr': 'id', 'table_description': "A student's registration for an event."},
+            options={'table': 'registrations', 'app': 'models', 'indexes': [Index(fields=['event_id', 'status']), Index(fields=['student_id']), PartialIndex(fields=['event_id', 'registered_at'], name='idx_registrations_waitlist_fifo', condition={'status': 'waitlisted'})], 'constraints': [UniqueConstraint(fields=('event_id', 'student_id'), name='uq_one_active_registration_per_student', condition="status IN ('confirmed', 'waitlisted')")], 'pk_attr': 'id', 'table_description': "A student's registration for an event."},
             bases=['Model'],
-        ),
-        # Partial and covering indexes — not expressible in Tortoise ORM model Meta.
-        ops.RunSQL(
-            sql="""
--- One active registration per student per event (cancelled rows excluded so re-register is allowed)
-CREATE UNIQUE INDEX uq_one_active_registration_per_student
-    ON registrations (event_id, student_id)
-    WHERE status IN ('confirmed', 'waitlisted');
-
--- Fast published event listing for students
-CREATE INDEX idx_events_published ON events (status) WHERE status = 'published';
-
--- FIFO waitlist ordering for promotion and position queries
-CREATE INDEX idx_registrations_waitlist_fifo
-    ON registrations (event_id, registered_at)
-    WHERE status = 'waitlisted';
-
--- Relay polling: only scan pending rows
-CREATE INDEX idx_jobs_pending ON notification_jobs (id) WHERE status = 'pending';
-
--- Stale-delivery reclaim: find stuck processing deliveries
-CREATE INDEX idx_log_processing ON notification_log (idempotency_key) WHERE status = 'processing';
-""",
-            reverse_sql="""
-DROP INDEX IF EXISTS uq_one_active_registration_per_student;
-DROP INDEX IF EXISTS idx_events_published;
-DROP INDEX IF EXISTS idx_registrations_waitlist_fifo;
-DROP INDEX IF EXISTS idx_jobs_pending;
-DROP INDEX IF EXISTS idx_log_processing;
-""",
         ),
     ]

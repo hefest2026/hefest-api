@@ -4,6 +4,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from tortoise import fields
+from tortoise.indexes import PartialIndex
 from tortoise.models import Model
 
 if TYPE_CHECKING:
@@ -37,3 +38,10 @@ class NotificationJob(Model):
 
     class Meta:
         table = "notification_jobs"
+        indexes = [
+            PartialIndex(
+                fields=["id"],
+                name="idx_jobs_pending",
+                condition={"status": "pending"},
+            ),
+        ]

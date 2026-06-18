@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 from tortoise import fields
+from tortoise.indexes import PartialIndex
 from tortoise.models import Model
 
 
@@ -29,3 +30,10 @@ class NotificationLog(Model):
 
     class Meta:
         table = "notification_log"
+        indexes = [
+            PartialIndex(
+                fields=["idempotency_key"],
+                name="idx_log_processing",
+                condition={"status": "processing"},
+            ),
+        ]
