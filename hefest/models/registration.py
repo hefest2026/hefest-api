@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from tortoise import fields
 from tortoise.models import Model
+
+if TYPE_CHECKING:
+    from hefest.models.event import Event
+    from hefest.models.user import User
 
 
 class RegistrationStatus(StrEnum):
@@ -21,12 +26,12 @@ class Registration(Model):
     """
 
     id = fields.UUIDField(primary_key=True)
-    event: fields.ForeignKeyRelation[Event] = fields.ForeignKeyField(  # type: ignore[name-defined]  # noqa: F821
+    event: fields.ForeignKeyRelation[Event] = fields.ForeignKeyField(
         "models.Event",
         related_name="registrations",
         on_delete=fields.OnDelete.CASCADE,
     )
-    student: fields.ForeignKeyRelation[User] = fields.ForeignKeyField(  # type: ignore[name-defined]  # noqa: F821
+    student: fields.ForeignKeyRelation[User] = fields.ForeignKeyField(
         "models.User",
         related_name="registrations",
         on_delete=fields.OnDelete.CASCADE,

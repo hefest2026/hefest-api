@@ -8,6 +8,9 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="HEFEST_", env_file=".env")
 
+    env: str = "dev"
+    log_level: str = "DEBUG"
+
     db_url: str = "asyncpg://hefest:hefest@localhost:5432/hefest_db"
     redis_url: str = "redis://localhost:6379"
     jwt_secret: str = "change-me-in-production"

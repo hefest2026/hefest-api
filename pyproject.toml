@@ -6,9 +6,10 @@ requires-python = ">=3.12"
 dependencies = [
     "asyncpg>=0.31.0",
     "fastapi[standard]>=0.137.1",
+    "loguru>=0.7.3",
     "passlib[bcrypt]>=1.7.4",
     "pydantic-settings>=2.14.1",
-    "python-jose[cryptography]>=3.5.0",
+    "pyjwt[crypto]>=2.8.0",
     "redis>=8.0.0",
     "tortoise-orm>=1.1.7",
 ]
@@ -25,12 +26,17 @@ dev = [
 [tool.ruff]
 line-length = 88
 target-version = "py312"
+# Generated migrations contain long raw-SQL strings; lint/format them like ty skips them.
+extend-exclude = ["migrations"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.ty.src]
+exclude = ["migrations"]
 
 [tool.tortoise-orm]
 connections.default = "asyncpg://hefest:hefest@localhost:5432/hefest_db"

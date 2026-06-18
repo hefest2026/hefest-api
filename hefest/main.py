@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncGenerator, Awaitable
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import Final
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI
+from fastapi import FastAPI, Response, status
+from loguru import logger
+from pydantic import BaseModel
 from tortoise.contrib.fastapi import RegisterTortoise
 
 from hefest.config import TORTOISE_ORM, settings
+from hefest.logging import configure_logging
+
+configure_logging(settings)
+
+READY_CHECK_TIMEOUT: Final = 2.0
+"""Per-dependency readiness check timeout in seconds."""
 
 
 @asynccontextmanager
@@ -33,18 +43,71 @@ app = FastAPI(
 )
 
 
-@app.get("/health", tags=["operational"])
-async def health() -> dict[str, str]:
+class HealthResponse(BaseModel):
+    """Liveness probe response."""
+
+    status: str
+    version: str
+
+
+class ReadyResponse(BaseModel):
+    """Readiness probe response."""
+
+    status: str
+    postgres: str
+    redis: str
+
+
+@app.get("/health", response_model=HealthResponse, tags=["operational"])
+async def health() -> HealthResponse:
     """Liveness probe — returns 200 unconditionally."""
-    return {"status": "ok"}
+    return HealthResponse(status="ok", version=app.version)
 
 
-@app.get("/ready", tags=["operational"])
-async def ready() -> dict[str, str]:
-    """Readiness probe — checks Postgres and Redis connectivity."""
+async def _check_dependency(name: str, probe: Awaitable[object]) -> str:
+    """Run a readiness probe, returning ``"ok"`` or ``"down"``.
+
+    Any failure (including timeout) is reported as ``"down"`` and logged;
+    a readiness probe must never raise, so the per-dependency status can be
+    surfaced in the response body.
+
+    Args:
+        name: Dependency label used for logging.
+        probe: Awaitable that resolves when the dependency is reachable.
+
+    Returns:
+        ``"ok"`` if the probe succeeded within the timeout, else ``"down"``.
+    """
+    try:
+        await asyncio.wait_for(probe, timeout=READY_CHECK_TIMEOUT)
+        return "ok"
+    except Exception:
+        logger.opt(exception=True).warning("Readiness check failed for {}", name)
+        return "down"
+
+
+@app.get(
+    "/ready",
+    response_model=ReadyResponse,
+    tags=["operational"],
+    responses={status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ReadyResponse}},
+)
+async def ready(response: Response) -> ReadyResponse:
+    """Readiness probe — 200 if all deps reachable, 503 otherwise."""
     from tortoise import Tortoise
 
-    conn = Tortoise.get_connection("default")
-    await conn.execute_query("SELECT 1")
-    await app.state.redis.ping()
-    return {"status": "ok"}
+    postgres, redis = await asyncio.gather(
+        _check_dependency(
+            "postgres", Tortoise.get_connection("default").execute_query("SELECT 1")
+        ),
+        _check_dependency("redis", app.state.redis.ping()),
+    )
+
+    ready_ok = postgres == "ok" and redis == "ok"
+    if not ready_ok:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return ReadyResponse(
+        status="ok" if ready_ok else "degraded",
+        postgres=postgres,
+        redis=redis,
+    )

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from tortoise import fields
 from tortoise.models import Model
+
+if TYPE_CHECKING:
+    from hefest.models.event import Event
+    from hefest.models.registration import Registration
 
 
 class UserRole(StrEnum):
@@ -22,8 +27,8 @@ class User(Model):
     created_at = fields.DatetimeField(auto_now_add=True)
 
     # reverse relations (declared here for type hints only)
-    events: fields.ReverseRelation["Event"]  # type: ignore[name-defined]  # noqa: F821
-    registrations: fields.ReverseRelation["Registration"]  # type: ignore[name-defined]  # noqa: F821
+    events: fields.ReverseRelation[Event]
+    registrations: fields.ReverseRelation[Registration]
 
     class Meta:
         table = "users"
