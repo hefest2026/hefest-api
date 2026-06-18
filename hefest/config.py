@@ -17,8 +17,23 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
 
-    # relay
-    relay_poll_interval: float = 1.0
+    # relay — outbox-to-Redis bridge.
+    #
+    # The relay is push-driven via PostgreSQL LISTEN/NOTIFY (channel below): an
+    # AFTER INSERT trigger on notification_jobs fires NOTIFY at COMMIT, waking the
+    # relay in ~milliseconds instead of waiting for a poll tick. NOTIFY is
+    # fire-and-forget (at-most-once) — a signal emitted while the relay is
+    # disconnected is lost — so a long-interval fallback poll guarantees eventual
+    # drain and catch-up after downtime. The outbox row itself is the durable
+    # source of truth; NOTIFY only collapses latency. See worker/relay.py.
+    relay_notify_channel: str = "hefest_jobs"
+    relay_fallback_poll_interval: float = 5.0
+    """Safety-net poll cadence (seconds) for jobs whose NOTIFY was missed."""
+    relay_batch_size: int = 100
+    """Max pending rows claimed per drain pass (FOR UPDATE SKIP LOCKED)."""
+    relay_stream: str = "hefest:notifications"
+    relay_stream_maxlen: int = 10_000
+    """Approximate (~) cap on Redis stream length via XADD MAXLEN."""
 
     # rate limiting
     rate_limit_login_count: int = 10
