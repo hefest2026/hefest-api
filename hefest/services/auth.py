@@ -5,9 +5,9 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+import bcrypt
 import jwt
 from fastapi import Response
-from passlib.context import CryptContext
 from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
 
@@ -23,32 +23,15 @@ if TYPE_CHECKING:
 # Password hashing (S1)
 # ---------------------------------------------------------------------------
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
-
 
 def hash_password(plain: str) -> str:
-    """Hash a plain-text password with bcrypt.
-
-    Args:
-        plain: The plain-text password to hash.
-
-    Returns:
-        A bcrypt hash string.
-    """
-    return _pwd_ctx.hash(plain)
+    """Hash a plain-text password with bcrypt (cost 12)."""
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt(rounds=12)).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Verify a plain-text password against a bcrypt hash.
-
-    Args:
-        plain: The plain-text password to verify.
-        hashed: The stored bcrypt hash.
-
-    Returns:
-        True if the password matches, False otherwise.
-    """
-    return _pwd_ctx.verify(plain, hashed)
+    """Verify a plain-text password against a bcrypt hash."""
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
 # ---------------------------------------------------------------------------
