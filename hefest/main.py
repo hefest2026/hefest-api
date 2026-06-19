@@ -7,12 +7,14 @@ from typing import Final
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Response, status
+from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from pydantic import BaseModel
 from tortoise.contrib.fastapi import RegisterTortoise
 
 from hefest.config import TORTOISE_ORM, settings
 from hefest.logging import configure_logging
+from hefest.routers.auth import router as auth_router
 
 configure_logging(settings)
 
@@ -41,6 +43,16 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth_router)
 
 
 class HealthResponse(BaseModel):
