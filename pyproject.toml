@@ -8,6 +8,7 @@ dependencies = [
     "fastapi[standard]>=0.137.1",
     "fastapi-sso==0.21.0",
     "loguru>=0.7.3",
+    "bcrypt<4",
     "passlib[bcrypt]>=1.7.4",
     "pydantic-settings>=2.14.1",
     "pyjwt[crypto]>=2.8.0",
