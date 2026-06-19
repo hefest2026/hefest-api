@@ -1,7 +1,6 @@
 from hefest.schemas.auth import (
     LoginRequest,
     OAuthProviderInfo,
-    PasswordPolicy,
     ProvidersResponse,
     RegisterRequest,
     TokenResponse,
@@ -11,7 +10,6 @@ from hefest.schemas.auth import (
 __all__ = [
     "LoginRequest",
     "OAuthProviderInfo",
-    "PasswordPolicy",
     "ProvidersResponse",
     "RegisterRequest",
     "TokenResponse",

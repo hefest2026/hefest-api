@@ -4,31 +4,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from pydantic import BaseModel, EmailStr, field_validator
-
-
-class PasswordPolicy(BaseModel):
-    """Password validation constraint."""
-
-    value: str
-
-    @field_validator("value")
-    @classmethod
-    def validate_password(cls, v: str) -> str:
-        """Enforce minimum password length of 12 characters.
-
-        Args:
-            v: The password string to validate
-
-        Returns:
-            The password string if valid
-
-        Raises:
-            ValueError: If password is less than 12 characters
-        """
-        if len(v) < 12:
-            raise ValueError("Password must be at least 12 characters long")
-        return v
+from pydantic import BaseModel, EmailStr
+from pydantic.functional_validators import AfterValidator
 
 
 def _password_validator(v: str) -> str:
@@ -58,7 +35,7 @@ class RegisterRequest(BaseModel):
     """
 
     email: EmailStr
-    password: Annotated[str, _password_validator]
+    password: Annotated[str, AfterValidator(_password_validator)]
     full_name: str
 
 

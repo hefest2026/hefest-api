@@ -56,11 +56,12 @@ async def register(body: RegisterRequest) -> dict[str, str]:
     )
     # TODO: enqueue verification email via notification pipeline (outbox)
     verify_token = auth_svc.create_email_verify_token(user)
-    # For now return the token in the response (dev only; production would email it)
-    return {
-        "message": "registered; check your email to verify your account",
-        "verify_token": verify_token,
+    response_body: dict[str, str] = {
+        "message": "registered; check your email to verify your account"
     }
+    if settings.env == "dev":
+        response_body["verify_token"] = verify_token
+    return response_body
 
 
 @router.post("/auth/verify-email")
@@ -163,7 +164,6 @@ async def logout(
 async def logout_all(
     response: Response,
     current_user: User = Depends(get_current_user),
-    cookie_token: Annotated[str | None, Cookie(alias="hefest_refresh")] = None,
 ) -> None:
     """Revoke all refresh tokens for the current user."""
     await auth_svc.revoke_all_for_user(str(current_user.id))
