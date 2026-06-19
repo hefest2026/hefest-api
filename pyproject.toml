@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "asyncpg>=0.31.0",
     "fastapi[standard]>=0.137.1",
+    "fastapi-sso==0.21.0",
     "loguru>=0.7.3",
     "passlib[bcrypt]>=1.7.4",
     "pydantic-settings>=2.14.1",
