@@ -7,12 +7,17 @@ from typing import Final
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Response, status
+from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from pydantic import BaseModel
 from tortoise.contrib.fastapi import RegisterTortoise
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from hefest.config import TORTOISE_ORM, settings
 from hefest.logging import configure_logging
+from hefest.middleware.rate_limit import SLIDING_WINDOW_LUA, RateLimitMiddleware
+from hefest.routers.auth import router as auth_router
+from hefest.routers.sso import router as sso_router
 
 configure_logging(settings)
 
@@ -29,6 +34,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         generate_schemas=False,
     ):
         app.state.redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+        app.state.rate_limit_script = app.state.redis.register_script(
+            SLIDING_WINDOW_LUA
+        )
         try:
             yield
         finally:
@@ -41,6 +49,22 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.add_middleware(RateLimitMiddleware)
+# ProxyHeadersMiddleware runs first (reverse registration order): it rewrites
+# request.client.host from X-Forwarded-For only when the direct peer is in
+# trusted_proxies, preventing clients from spoofing their IP.
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxies)
+
+app.include_router(auth_router)
+app.include_router(sso_router)
 
 
 class HealthResponse(BaseModel):
