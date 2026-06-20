@@ -18,17 +18,21 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60
 
     # relay
-    relay_poll_interval: float = 1.0
+    relay_poll_interval_seconds: float = 1.0
+
+    # trusted reverse proxies (ProxyHeadersMiddleware uses this list)
+    # set to the nginx container IP or CIDR in production
+    trusted_proxies: list[str] = ["127.0.0.1", "::1"]
 
     # rate limiting
     rate_limit_login_count: int = 10
-    rate_limit_login_window: int = 60
+    rate_limit_login_window_seconds: int = 60
     rate_limit_register_count: int = 5
-    rate_limit_register_window: int = 3600
+    rate_limit_register_window_seconds: int = 3600
     rate_limit_event_register_count: int = 30
-    rate_limit_event_register_window: int = 60
+    rate_limit_event_register_window_seconds: int = 60
     rate_limit_global_count: int = 200
-    rate_limit_global_window: int = 60
+    rate_limit_global_window_seconds: int = 60
 
 
 settings = Settings()
