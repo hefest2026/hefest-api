@@ -68,7 +68,79 @@ jobs:
         # don't add tests yet stay green. Any real failure still fails the job.
         run: |
           set +e
-          uv run pytest -q
+          uv run pytest -q --ignore=tests/test_e2e_staging.py
           code=$?
           if [ "$code" -eq 5 ]; then echo "::notice::No tests collected"; exit 0; fi
           exit "$code"
+
+  e2e:
+    name: E2E (live stack)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hefest
+          POSTGRES_PASSWORD: hefest
+          POSTGRES_DB: hefest_db
+        options: >-
+          --health-cmd "pg_isready -U hefest -d hefest_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 6379:6379
+    env:
+      PYTHONPATH: .
+      HEFEST_DB_URL: asyncpg://hefest:hefest@localhost:5432/hefest_db
+      HEFEST_REDIS_URL: redis://localhost:6379
+      HEFEST_JWT_SECRET: ci-e2e-secret-not-for-production
+      HEFEST_ENV: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-groups
+
+      - name: Run migrations
+        run: >-
+          uv run tortoise
+          -c hefest.config.TORTOISE_ORM
+          migrate
+
+      - name: Start API in background
+        run: |
+          uv run uvicorn hefest.main:app \
+            --host 0.0.0.0 --port 8000 \
+            --log-level warning &
+          echo $! > /tmp/uvicorn.pid
+
+      - name: Wait for API to be healthy
+        run: |
+          for i in $(seq 1 20); do
+            status=$(curl -sf http://localhost:8000/health \
+              -o /dev/null -w "%{http_code}" || echo 000)
+            [ "$status" = "200" ] && echo "API healthy" && exit 0
+            echo "Attempt $i: got $status, retrying in 3s..."
+            sleep 3
+          done
+          echo "API did not start in time" && exit 1
+
+      - name: Run E2E suite
+        env:
+          HEFEST_STAGING_URL: http://localhost:8000
+        run: uv run pytest tests/test_e2e_staging.py -v --tb=short
+
+      - name: Stop API
+        if: always()
+        run: kill $(cat /tmp/uvicorn.pid) 2>/dev/null || true
