@@ -1,7 +1,8 @@
 """E2E tests against the live staging environment (hefest.adviz.bg).
 
 Run with:
-    HEFEST_STAGING_URL=https://hefest.adviz.bg uv run pytest tests/test_e2e_staging.py -v
+    HEFEST_STAGING_URL=https://hefest.adviz.bg \
+    uv run pytest tests/test_e2e_staging.py -v
 
 Skipped automatically when HEFEST_STAGING_URL is not set so CI doesn't
 hit staging by accident.
@@ -10,6 +11,7 @@ After each run the rate-limit Redis keys for the test client IP are flushed
 via the /internal/flush-ratelimit endpoint so the suite can be re-run
 immediately. That endpoint is only wired in dev/staging (ENV != production).
 """
+
 from __future__ import annotations
 
 import os
@@ -37,7 +39,9 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="session")
 def client() -> httpx.Client:
-    with httpx.Client(base_url=BASE, headers=HEADERS, timeout=15, follow_redirects=False) as c:
+    with httpx.Client(
+        base_url=BASE, headers=HEADERS, timeout=15, follow_redirects=False
+    ) as c:
         yield c
 
 
@@ -47,7 +51,10 @@ def verified_user(client: httpx.Client) -> dict[str, str]:
     email = f"e2e-{uuid.uuid4().hex[:8]}@example.com"
     password = "StrongPass123!"
 
-    reg = client.post("/register", json={"email": email, "password": password, "full_name": "E2E User"})
+    reg = client.post(
+        "/register",
+        json={"email": email, "password": password, "full_name": "E2E User"},
+    )
     assert reg.status_code == 201, f"register failed: {reg.text}"
     body = reg.json()
     if "verify_token" not in body:
@@ -121,38 +128,52 @@ class TestProviders:
 
 class TestRegistration:
     def test_register_new_user_201(self, client: httpx.Client) -> None:
-        r = client.post("/register", json={
-            "email": f"e2e-reg-{uuid.uuid4().hex[:8]}@example.com",
-            "password": "StrongPass123!",
-            "full_name": "New User",
-        })
+        r = client.post(
+            "/register",
+            json={
+                "email": f"e2e-reg-{uuid.uuid4().hex[:8]}@example.com",
+                "password": "StrongPass123!",
+                "full_name": "New User",
+            },
+        )
         assert r.status_code == 201
         assert "message" in r.json()
 
     def test_register_dev_returns_verify_token(self, client: httpx.Client) -> None:
-        r = client.post("/register", json={
-            "email": f"e2e-tok-{uuid.uuid4().hex[:8]}@example.com",
-            "password": "StrongPass123!",
-            "full_name": "Token User",
-        })
+        r = client.post(
+            "/register",
+            json={
+                "email": f"e2e-tok-{uuid.uuid4().hex[:8]}@example.com",
+                "password": "StrongPass123!",
+                "full_name": "Token User",
+            },
+        )
         assert r.status_code == 201
         assert "verify_token" in r.json()
 
-    def test_register_duplicate_email_409(self, verified_user: dict[str, str], client: httpx.Client) -> None:
-        r = client.post("/register", json={
-            "email": verified_user["email"],
-            "password": "StrongPass123!",
-            "full_name": "Dupe",
-        })
+    def test_register_duplicate_email_409(
+        self, verified_user: dict[str, str], client: httpx.Client
+    ) -> None:
+        r = client.post(
+            "/register",
+            json={
+                "email": verified_user["email"],
+                "password": "StrongPass123!",
+                "full_name": "Dupe",
+            },
+        )
         assert r.status_code == 409
         assert r.headers.get("X-Error-Code") == "email_exists"
 
     def test_register_short_password_422(self, client: httpx.Client) -> None:
-        r = client.post("/register", json={
-            "email": f"e2e-short-{uuid.uuid4().hex[:8]}@example.com",
-            "password": "short",
-            "full_name": "Short Pass",
-        })
+        r = client.post(
+            "/register",
+            json={
+                "email": f"e2e-short-{uuid.uuid4().hex[:8]}@example.com",
+                "password": "short",
+                "full_name": "Short Pass",
+            },
+        )
         assert r.status_code == 422
 
 
@@ -174,11 +195,14 @@ class TestVerifyEmail:
 
     def test_verify_token_expires_in_900(self, client: httpx.Client) -> None:
         # Register a fresh user to get a verify_token
-        reg = client.post("/register", json={
-            "email": f"e2e-exp-{uuid.uuid4().hex[:8]}@example.com",
-            "password": "StrongPass123!",
-            "full_name": "Expires Check",
-        })
+        reg = client.post(
+            "/register",
+            json={
+                "email": f"e2e-exp-{uuid.uuid4().hex[:8]}@example.com",
+                "password": "StrongPass123!",
+                "full_name": "Expires Check",
+            },
+        )
         assert reg.status_code == 201
         body = reg.json()
         if "verify_token" not in body:
@@ -194,41 +218,61 @@ class TestVerifyEmail:
 
 
 class TestLogin:
-    def test_login_verified_200(self, client: httpx.Client, verified_user: dict[str, str]) -> None:
-        r = client.post("/login", json={"email": verified_user["email"], "password": verified_user["password"]})
+    def test_login_verified_200(
+        self, client: httpx.Client, verified_user: dict[str, str]
+    ) -> None:
+        r = client.post(
+            "/login",
+            json={
+                "email": verified_user["email"],
+                "password": verified_user["password"],
+            },
+        )
         assert r.status_code == 200
         body = r.json()
         assert "access_token" in body
         assert body["expires_in"] == 900
 
-    def test_login_sets_refresh_cookie(self, client: httpx.Client, verified_user: dict[str, str]) -> None:
-        r = client.post("/login", json={"email": verified_user["email"], "password": verified_user["password"]})
+    def test_login_sets_refresh_cookie(
+        self, client: httpx.Client, verified_user: dict[str, str]
+    ) -> None:
+        r = client.post(
+            "/login",
+            json={
+                "email": verified_user["email"],
+                "password": verified_user["password"],
+            },
+        )
         assert r.status_code == 200
         assert "hefest_refresh" in r.cookies
 
     def test_login_unverified_403(self, client: httpx.Client) -> None:
-        reg = client.post("/register", json={
-            "email": f"e2e-unv-{uuid.uuid4().hex[:8]}@example.com",
-            "password": "StrongPass123!",
-            "full_name": "Unverified",
-        })
-        assert reg.status_code == 201
-        r = client.post("/login", json={"email": reg.json().get("email", f"e2e-unv@example.com"), "password": "StrongPass123!"})
-        # email is not in the register response body; use the one we sent
         email = f"e2e-unv-{uuid.uuid4().hex[:8]}@example.com"
-        reg2 = client.post("/register", json={"email": email, "password": "StrongPass123!", "full_name": "Unverified2"})
+        reg2 = client.post(
+            "/register",
+            json={"email": email, "password": "StrongPass123!", "full_name": "Unv2"},
+        )
         if reg2.status_code == 201:
-            r = client.post("/login", json={"email": email, "password": "StrongPass123!"})
+            r = client.post(
+                "/login", json={"email": email, "password": "StrongPass123!"}
+            )
             assert r.status_code == 403
             assert r.headers.get("X-Error-Code") == "email_not_verified"
 
-    def test_login_wrong_password_401(self, client: httpx.Client, verified_user: dict[str, str]) -> None:
-        r = client.post("/login", json={"email": verified_user["email"], "password": "wrongpassword"})
+    def test_login_wrong_password_401(
+        self, client: httpx.Client, verified_user: dict[str, str]
+    ) -> None:
+        r = client.post(
+            "/login",
+            json={"email": verified_user["email"], "password": "wrongpassword"},
+        )
         assert r.status_code == 401
         assert r.headers.get("X-Error-Code") == "invalid_credentials"
 
     def test_login_nonexistent_user_401(self, client: httpx.Client) -> None:
-        r = client.post("/login", json={"email": "nobody@example.com", "password": "whatever"})
+        r = client.post(
+            "/login", json={"email": "nobody@example.com", "password": "whatever"}
+        )
         assert r.status_code == 401
         assert r.headers.get("X-Error-Code") == "invalid_credentials"
 
@@ -239,12 +283,22 @@ class TestLogin:
 
 
 class TestRefresh:
-    def _fresh_cookie(self, client: httpx.Client, verified_user: dict[str, str]) -> httpx.Cookies:
-        r = client.post("/login", json={"email": verified_user["email"], "password": verified_user["password"]})
+    def _fresh_cookie(
+        self, client: httpx.Client, verified_user: dict[str, str]
+    ) -> httpx.Cookies:
+        r = client.post(
+            "/login",
+            json={
+                "email": verified_user["email"],
+                "password": verified_user["password"],
+            },
+        )
         assert r.status_code == 200
         return r.cookies
 
-    def test_refresh_rotates_token(self, client: httpx.Client, verified_user: dict[str, str]) -> None:
+    def test_refresh_rotates_token(
+        self, client: httpx.Client, verified_user: dict[str, str]
+    ) -> None:
         cookies = self._fresh_cookie(client, verified_user)
         old_refresh = cookies["hefest_refresh"]
         r = client.post("/auth/refresh", cookies=cookies)
@@ -252,16 +306,21 @@ class TestRefresh:
         assert "access_token" in r.json()
         assert r.cookies["hefest_refresh"] != old_refresh
 
-    def test_refresh_replay_401_reuse_detected(self, client: httpx.Client, verified_user: dict[str, str]) -> None:
+    def test_refresh_replay_401_reuse_detected(
+        self, client: httpx.Client, verified_user: dict[str, str]
+    ) -> None:
         cookies = self._fresh_cookie(client, verified_user)
         stale = httpx.Cookies(dict(cookies))
-        client.post("/auth/refresh", cookies=stale)   # consumes it
+        client.post("/auth/refresh", cookies=stale)  # consumes it
         r = client.post("/auth/refresh", cookies=stale)  # replay
         assert r.status_code == 401
         assert r.headers.get("X-Error-Code") == "token_reuse_detected"
 
     def test_refresh_fake_token_401(self, client: httpx.Client) -> None:
-        r = client.post("/auth/refresh", cookies=httpx.Cookies({"hefest_refresh": "fake-token-value"}))
+        r = client.post(
+            "/auth/refresh",
+            cookies=httpx.Cookies({"hefest_refresh": "fake-token-value"}),
+        )
         assert r.status_code == 401
 
     def test_refresh_no_token_401(self, client: httpx.Client) -> None:
@@ -275,22 +334,46 @@ class TestRefresh:
 
 
 class TestLogout:
-    def test_logout_204(self, client: httpx.Client, verified_user: dict[str, str]) -> None:
-        login = client.post("/login", json={"email": verified_user["email"], "password": verified_user["password"]})
+    def test_logout_204(
+        self, client: httpx.Client, verified_user: dict[str, str]
+    ) -> None:
+        login = client.post(
+            "/login",
+            json={
+                "email": verified_user["email"],
+                "password": verified_user["password"],
+            },
+        )
         assert login.status_code == 200
         r = client.post("/auth/logout", cookies=login.cookies)
         assert r.status_code == 204
 
-    def test_logout_revokes_refresh(self, client: httpx.Client, verified_user: dict[str, str]) -> None:
-        login = client.post("/login", json={"email": verified_user["email"], "password": verified_user["password"]})
+    def test_logout_revokes_refresh(
+        self, client: httpx.Client, verified_user: dict[str, str]
+    ) -> None:
+        login = client.post(
+            "/login",
+            json={
+                "email": verified_user["email"],
+                "password": verified_user["password"],
+            },
+        )
         assert login.status_code == 200
         cookies = login.cookies
         client.post("/auth/logout", cookies=cookies)
         r = client.post("/auth/refresh", cookies=cookies)
         assert r.status_code == 401
 
-    def test_logout_all_204(self, client: httpx.Client, verified_user: dict[str, str]) -> None:
-        login = client.post("/login", json={"email": verified_user["email"], "password": verified_user["password"]})
+    def test_logout_all_204(
+        self, client: httpx.Client, verified_user: dict[str, str]
+    ) -> None:
+        login = client.post(
+            "/login",
+            json={
+                "email": verified_user["email"],
+                "password": verified_user["password"],
+            },
+        )
         assert login.status_code == 200
         r = client.post(
             "/auth/logout-all",
@@ -334,11 +417,14 @@ class TestZRateLimiting:
     def test_register_rate_limit_triggers_429(self, client: httpx.Client) -> None:
         got_429 = False
         for _ in range(8):
-            r = client.post("/register", json={
-                "email": f"rl-{uuid.uuid4().hex}@example.com",
-                "password": "StrongPass123!",
-                "full_name": "RL",
-            })
+            r = client.post(
+                "/register",
+                json={
+                    "email": f"rl-{uuid.uuid4().hex}@example.com",
+                    "password": "StrongPass123!",
+                    "full_name": "RL",
+                },
+            )
             if r.status_code == 429:
                 got_429 = True
                 assert "Retry-After" in r.headers

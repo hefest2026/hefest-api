@@ -17,8 +17,8 @@ from hefest.config import TORTOISE_ORM, settings
 from hefest.logging import configure_logging
 from hefest.middleware.rate_limit import SLIDING_WINDOW_LUA, RateLimitMiddleware
 from hefest.routers.auth import router as auth_router
-from hefest.routers.sso import router as sso_router
 from hefest.routers.internal import router as internal_router
+from hefest.routers.sso import router as sso_router
 
 configure_logging(settings)
 
