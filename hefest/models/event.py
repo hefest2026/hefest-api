@@ -4,6 +4,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from tortoise import fields
+from tortoise.indexes import PartialIndex
 from tortoise.models import Model
 
 if TYPE_CHECKING:
@@ -44,4 +45,9 @@ class Event(Model):
         table = "events"
         indexes = [
             ("organizer_id",),
+            PartialIndex(
+                fields=["status"],
+                name="idx_events_published",
+                condition={"status": "published"},
+            ),
         ]
