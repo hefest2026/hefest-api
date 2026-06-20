@@ -195,6 +195,8 @@ class TestVerifyEmail:
 
     def test_verify_expires_in_is_900(self, client: httpx.Client) -> None:
         reg = _register(client, f"e2e-exp-{uuid.uuid4().hex[:8]}@example.com")
+        if reg.status_code == 429:
+            pytest.skip("rate-limited — skipping expires_in assertion")
         assert reg.status_code == 201
         body = reg.json()
         if "verify_token" not in body:
@@ -264,42 +266,41 @@ class TestRefresh:
         self,
         client: httpx.Client,
         verified_user: dict[str, str],
-    ) -> httpx.Cookies:
+    ) -> str:
+        """Log in and return the refresh token (also stored in client.cookies)."""
         r = _login(client, verified_user["email"], verified_user["password"])
         assert r.status_code == 200
-        return r.cookies
+        return str(r.cookies["hefest_refresh"])
 
     def test_refresh_rotates_token(
         self,
         client: httpx.Client,
         verified_user: dict[str, str],
     ) -> None:
-        cookies = self._fresh_login(client, verified_user)
-        old = cookies["hefest_refresh"]
-        r = client.post("/auth/refresh", cookies=cookies)
+        old = self._fresh_login(client, verified_user)
+        r = client.post("/auth/refresh")  # uses client's cookie jar
         assert r.status_code == 200
         assert "access_token" in r.json()
-        assert r.cookies["hefest_refresh"] != old
+        assert client.cookies["hefest_refresh"] != old
 
     def test_refresh_replay_401_reuse_detected(
         self,
         client: httpx.Client,
         verified_user: dict[str, str],
     ) -> None:
-        stale = httpx.Cookies(dict(self._fresh_login(client, verified_user)))
-        client.post("/auth/refresh", cookies=stale)  # consume
-        r = client.post("/auth/refresh", cookies=stale)  # replay
+        stale = self._fresh_login(client, verified_user)
+        client.post("/auth/refresh")  # consume — rotates token in jar
+        client.cookies.set("hefest_refresh", stale)  # replay with stale token
+        r = client.post("/auth/refresh")
         assert r.status_code == 401
         assert r.headers.get("X-Error-Code") == "token_reuse_detected"
 
     def test_refresh_fake_token_401(self, client: httpx.Client) -> None:
-        r = client.post(
-            "/auth/refresh",
-            cookies=httpx.Cookies({"hefest_refresh": "fake-token"}),
-        )
-        assert r.status_code == 401
+        client.cookies.set("hefest_refresh", "fake-token")
+        assert client.post("/auth/refresh").status_code == 401
 
     def test_refresh_no_token_401(self, client: httpx.Client) -> None:
+        client.cookies.delete("hefest_refresh")
         assert client.post("/auth/refresh").status_code == 401
 
 
