@@ -72,6 +72,16 @@ def client() -> Generator[httpx.Client, None, None]:
 
 
 @pytest.fixture(scope="session")
+def unverified_user(client: httpx.Client) -> dict[str, str]:
+    """Register once without verifying — stays unverified for the full session."""
+    email = f"e2e-unv-{uuid.uuid4().hex[:8]}@example.com"
+    password = "StrongPass123!"
+    reg = _register(client, email, password)
+    assert reg.status_code == 201, f"unverified register failed: {reg.text}"
+    return {"email": email, "password": password}
+
+
+@pytest.fixture(scope="session")
 def verified_user(client: httpx.Client) -> dict[str, str]:
     """Register + verify a fresh account; return tokens and credentials."""
     email = f"e2e-{uuid.uuid4().hex[:8]}@example.com"
@@ -151,15 +161,14 @@ class TestProviders:
 
 
 class TestRegistration:
-    def test_register_new_user_201(self, client: httpx.Client) -> None:
+    def test_register_201_returns_message_and_verify_token(
+        self, client: httpx.Client
+    ) -> None:
         r = _register(client, f"e2e-reg-{uuid.uuid4().hex[:8]}@example.com")
         assert r.status_code == 201
-        assert "message" in r.json()
-
-    def test_register_dev_exposes_verify_token(self, client: httpx.Client) -> None:
-        r = _register(client, f"e2e-tok-{uuid.uuid4().hex[:8]}@example.com")
-        assert r.status_code == 201
-        assert "verify_token" in r.json()
+        body = r.json()
+        assert "message" in body
+        assert "verify_token" in body
 
     def test_register_duplicate_email_409(
         self,
@@ -225,12 +234,10 @@ class TestLogin:
         assert r.status_code == 200
         assert "hefest_refresh" in r.cookies
 
-    def test_login_unverified_403(self, client: httpx.Client) -> None:
-        email = f"e2e-unv-{uuid.uuid4().hex[:8]}@example.com"
-        reg = _register(client, email)
-        if reg.status_code != 201:
-            pytest.skip("register rate-limited; skipping unverified-login test")
-        r = _login(client, email, "StrongPass123!")
+    def test_login_unverified_403(
+        self, client: httpx.Client, unverified_user: dict[str, str]
+    ) -> None:
+        r = _login(client, unverified_user["email"], unverified_user["password"])
         assert r.status_code == 403
         assert r.headers.get("X-Error-Code") == "email_not_verified"
 
@@ -354,10 +361,16 @@ class TestLogout:
 
 
 @pytest.fixture(scope="module", autouse=True)
-def flush_ratelimit_after_module(
+def flush_ratelimit_around_module(
     client: httpx.Client,
 ) -> Generator[None, None, None]:
-    """Flush this IP's rate-limit Redis keys after the module completes."""
+    """Flush rate-limit Redis keys before AND after the Z-rate-limit class.
+
+    A pre-flush ensures this class starts from a clean slate regardless of
+    how many /register or /login calls the preceding tests consumed. The
+    post-flush lets the suite be re-run immediately.
+    """
+    client.delete("/internal/flush-ratelimit")
     yield
     r = client.delete("/internal/flush-ratelimit")
     if r.status_code not in (200, 204, 404):
