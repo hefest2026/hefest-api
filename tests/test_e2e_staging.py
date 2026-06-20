@@ -86,10 +86,12 @@ def verified_user(client: httpx.Client) -> dict[str, str]:
     verify = client.post("/auth/verify-email", json={"token": body["verify_token"]})
     assert verify.status_code == 200, f"verify-email failed: {verify.text}"
 
+    vbody = verify.json()
     return {
         "email": email,
         "password": password,
-        "access_token": verify.json()["access_token"],
+        "access_token": vbody["access_token"],
+        "expires_in": str(vbody.get("expires_in", "")),
         "refresh_cookie": dict(verify.cookies).get("hefest_refresh", ""),
     }
 
@@ -193,17 +195,8 @@ class TestVerifyEmail:
     def test_verify_sets_refresh_cookie(self, verified_user: dict[str, str]) -> None:
         assert verified_user["refresh_cookie"]
 
-    def test_verify_expires_in_is_900(self, client: httpx.Client) -> None:
-        reg = _register(client, f"e2e-exp-{uuid.uuid4().hex[:8]}@example.com")
-        if reg.status_code == 429:
-            pytest.skip("rate-limited — skipping expires_in assertion")
-        assert reg.status_code == 201
-        body = reg.json()
-        if "verify_token" not in body:
-            pytest.skip("verify_token not in dev response")
-        verify = client.post("/auth/verify-email", json={"token": body["verify_token"]})
-        assert verify.status_code == 200
-        assert verify.json()["expires_in"] == 900
+    def test_verify_expires_in_is_900(self, verified_user: dict[str, str]) -> None:
+        assert verified_user["expires_in"] == "900"
 
 
 # ---------------------------------------------------------------------------
