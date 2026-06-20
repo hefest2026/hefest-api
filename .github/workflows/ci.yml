@@ -112,11 +112,18 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen --all-groups
 
-      - name: Run migrations
-        run: >-
-          uv run tortoise
-          -c hefest.config.TORTOISE_ORM
-          migrate
+      - name: Create schema (generate_schemas — migration correctness is tested by the migrations job)
+        run: |
+          uv run python - <<'EOF'
+          import asyncio
+          from tortoise import Tortoise
+          from hefest.config import TORTOISE_ORM
+          async def main() -> None:
+              await Tortoise.init(config=TORTOISE_ORM)
+              await Tortoise.generate_schemas()
+              await Tortoise.close_connections()
+          asyncio.run(main())
+          EOF
 
       - name: Start API in background
         run: |
