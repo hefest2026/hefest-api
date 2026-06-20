@@ -15,6 +15,7 @@ from tortoise.contrib.fastapi import RegisterTortoise
 from hefest.config import TORTOISE_ORM, settings
 from hefest.logging import configure_logging
 from hefest.routers.auth import router as auth_router
+from hefest.routers.sso import router as sso_router
 
 configure_logging(settings)
 
@@ -53,6 +54,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(sso_router)
 
 
 class HealthResponse(BaseModel):
