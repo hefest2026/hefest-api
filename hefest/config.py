@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     microsoft_tenant: str = ""
     microsoft_redirect_uri: str = ""
 
+
     # relay — outbox-to-Redis bridge.
     #
     # The relay is push-driven via PostgreSQL LISTEN/NOTIFY (channel below): an
