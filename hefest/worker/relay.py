@@ -25,14 +25,24 @@ Delivery is at-least-once by design: a crash between ``XADD`` and COMMIT of the
 ``published`` update re-publishes on the next drain. The worker deduplicates via
 ``notification_log`` (see spec §7.5), so duplicates are safe.
 
-This module is a scaffold — the control flow and interfaces are fixed; the
-bodies are stubbed (``NotImplementedError``) for a follow-up implementation.
 """
 
 from __future__ import annotations
 
 import asyncio
+import signal
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
+
+import asyncpg
+import orjson
+import redis.asyncio as aioredis
+from loguru import logger
+from tortoise import Tortoise
+from tortoise.transactions import in_transaction
+
+from hefest.config import TORTOISE_ORM, settings
+from hefest.logging import configure_logging
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -41,6 +51,14 @@ if TYPE_CHECKING:
 # Redis stream fields are flat; the JSON envelope the worker parses is carried
 # in a single field under this key. Keep in sync with the C++ worker's parser.
 MESSAGE_FIELD: str = "data"
+
+# Reconnect backoff bounds (seconds) for the dedicated LISTEN connection.
+_RECONNECT_BACKOFF_INITIAL: float = 1.0
+_RECONNECT_BACKOFF_MAX: float = 30.0
+# Heartbeat cadence (seconds) on the LISTEN connection. asyncpg dispatches
+# NOTIFY callbacks from its background reader, so this loop only has to keep the
+# socket alive and surface a silently dropped connection as a raised error.
+_LISTEN_HEARTBEAT_SECONDS: float = 30.0
 
 
 async def claim_pending_jobs(
@@ -61,10 +79,24 @@ async def claim_pending_jobs(
         Claimed rows (``id``, ``event_type``, ``payload``, ``idempotency_key``),
         oldest first; empty when no work is pending.
     """
-    # TODO(HEF-16): SELECT id, event_type, payload, idempotency_key
-    #   FROM notification_jobs WHERE status = 'pending'
-    #   ORDER BY created_at LIMIT $1 FOR UPDATE SKIP LOCKED
-    raise NotImplementedError
+    rows = await conn.execute_query_dict(
+        """
+        SELECT id, event_type, payload, idempotency_key
+        FROM notification_jobs
+        WHERE status = 'pending'
+        ORDER BY created_at
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+        """,
+        [batch_size],
+    )
+    # asyncpg returns jsonb as raw text on raw queries (no ORM decode layer);
+    # normalise to a dict so build_envelope can splat it.
+    for row in rows:
+        payload = row["payload"]
+        if isinstance(payload, (str, bytes, bytearray)):
+            row["payload"] = orjson.loads(payload)
+    return rows
 
 
 def build_envelope(row: dict[str, Any]) -> dict[str, Any]:
@@ -79,9 +111,13 @@ def build_envelope(row: dict[str, Any]) -> dict[str, Any]:
     Returns:
         The envelope: ``type`` + ``idempotency_key`` merged over ``payload``.
     """
-    # TODO(HEF-16): {"type": row["event_type"],
-    #   "idempotency_key": row["idempotency_key"], **row["payload"]}
-    raise NotImplementedError
+    # Contract fields are spread last so a stray "type"/"idempotency_key" in the
+    # stored payload can never shadow the relay's authoritative envelope keys.
+    return {
+        **row["payload"],
+        "type": row["event_type"],
+        "idempotency_key": row["idempotency_key"],
+    }
 
 
 async def publish_batch(
@@ -98,9 +134,15 @@ async def publish_batch(
         maxlen: Approximate ``MAXLEN ~`` cap to bound stream growth.
         rows: Rows previously claimed by :func:`claim_pending_jobs`.
     """
-    # TODO(HEF-16): pipeline XADD orjson.dumps(build_envelope(row)) under
-    #   MESSAGE_FIELD, with maxlen=maxlen, approximate=True; await execute().
-    raise NotImplementedError
+    async with redis.pipeline(transaction=False) as pipe:
+        for row in rows:
+            pipe.xadd(
+                stream,
+                {MESSAGE_FIELD: orjson.dumps(build_envelope(row))},
+                maxlen=maxlen,
+                approximate=True,
+            )
+        await pipe.execute()
 
 
 async def mark_published(conn: BaseDBAsyncClient, ids: list[Any]) -> None:
@@ -110,9 +152,14 @@ async def mark_published(conn: BaseDBAsyncClient, ids: list[Any]) -> None:
         conn: The same connection that claimed the rows.
         ids: Primary keys of the published rows.
     """
-    # TODO(HEF-16): UPDATE notification_jobs SET status='published',
-    #   updated_at=NOW() WHERE id = ANY($1)
-    raise NotImplementedError
+    await conn.execute_query(
+        """
+        UPDATE notification_jobs
+        SET status = 'published', updated_at = NOW()
+        WHERE id = ANY($1::uuid[])
+        """,
+        [ids],
+    )
 
 
 async def drain(redis: Redis, batch_size: int, stream: str, maxlen: int) -> int:
@@ -122,13 +169,17 @@ async def drain(redis: Redis, batch_size: int, stream: str, maxlen: int) -> int:
         Number of rows published. A return of ``batch_size`` means the table may
         hold more pending work; the caller should drain again immediately.
     """
-    # TODO(HEF-16): async with in_transaction("default") as conn:
-    #   rows = await claim_pending_jobs(conn, batch_size)
-    #   if not rows: return 0
-    #   await publish_batch(redis, stream, maxlen, rows)
-    #   await mark_published(conn, [r["id"] for r in rows])
-    #   return len(rows)
-    raise NotImplementedError
+    async with in_transaction("default") as conn:
+        rows = await claim_pending_jobs(conn, batch_size)
+        if not rows:
+            return 0
+        # Publish before marking published: a failure here leaves the rows
+        # pending (re-published next drain) rather than silently dropped. The
+        # row lock is held until COMMIT, so the published update is serialised
+        # with the claim.
+        await publish_batch(redis, stream, maxlen, rows)
+        await mark_published(conn, [row["id"] for row in rows])
+        return len(rows)
 
 
 async def _listen(wake: asyncio.Event) -> None:
@@ -142,12 +193,38 @@ async def _listen(wake: asyncio.Event) -> None:
     Args:
         wake: Event shared with :func:`_drainer`; set to request a drain.
     """
-    # TODO(HEF-16): loop { conn = await asyncpg.connect(dsn);
-    #   await conn.add_listener(channel, lambda *_: wake.set());
-    #   wake.set();  # catch up on (re)connect
-    #   await <termination>; } with reconnect backoff. dsn = db_url with the
-    #   asyncpg:// scheme rewritten to postgresql:// for asyncpg.connect().
-    raise NotImplementedError
+    # asyncpg.connect wants a libpq-style URL; settings.db_url carries Tortoise's
+    # asyncpg:// scheme.
+    dsn = settings.db_url.replace("asyncpg://", "postgresql://", 1)
+    channel = settings.relay_notify_channel
+    backoff = _RECONNECT_BACKOFF_INITIAL
+    while True:
+        try:
+            conn = await asyncpg.connect(dsn)
+        except (OSError, asyncpg.PostgresError) as exc:
+            logger.warning(
+                "Relay LISTEN connect failed ({}); retrying in {}s", exc, backoff
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, _RECONNECT_BACKOFF_MAX)
+            continue
+
+        backoff = _RECONNECT_BACKOFF_INITIAL
+        try:
+            await conn.add_listener(channel, lambda *_: wake.set())
+            # Force a catch-up drain for any NOTIFY missed while disconnected.
+            wake.set()
+            logger.info("Relay listening on '{}' for outbox notifications", channel)
+            # Keep the socket alive and surface a dropped connection as a raised
+            # error; NOTIFY callbacks fire on asyncpg's background reader.
+            while True:
+                await asyncio.sleep(_LISTEN_HEARTBEAT_SECONDS)
+                await conn.execute("SELECT 1")
+        except (OSError, asyncpg.PostgresError) as exc:
+            logger.warning("Relay LISTEN connection lost ({}); reconnecting", exc)
+        finally:
+            with suppress(Exception):
+                await conn.close()
 
 
 async def _drainer(redis: Redis, wake: asyncio.Event) -> None:
@@ -161,12 +238,20 @@ async def _drainer(redis: Redis, wake: asyncio.Event) -> None:
         redis: Async Redis client.
         wake: Event set by :func:`_listen` (and on fallback timeout).
     """
-    # TODO(HEF-16): while running:
-    #   while await drain(...) == batch_size: pass   # drain to empty
-    #   wake.clear()
-    #   with suppress(TimeoutError):
-    #       await asyncio.wait_for(wake.wait(), settings.relay_fallback_poll_interval)
-    raise NotImplementedError
+    batch_size = settings.relay_batch_size
+    stream = settings.relay_stream
+    maxlen = settings.relay_stream_maxlen
+    interval = settings.relay_fallback_poll_interval
+    while True:
+        # Clear before draining: a NOTIFY arriving during the drain re-sets the
+        # event so the wait below returns immediately and we drain again, rather
+        # than the signal being lost in the gap between drain and clear.
+        wake.clear()
+        # A full batch means more rows may be pending — keep draining to empty.
+        while await drain(redis, batch_size, stream, maxlen) == batch_size:
+            pass
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(wake.wait(), interval)
 
 
 async def run() -> None:
@@ -175,10 +260,28 @@ async def run() -> None:
     Initialises Tortoise and Redis, starts :func:`_listen` and :func:`_drainer`
     on a shared :class:`asyncio.Event`, and tears everything down on signal.
     """
-    # TODO(HEF-16): RegisterTortoise/Tortoise.init; redis = from_url(...);
-    #   wake = asyncio.Event(); gather(_listen(wake), _drainer(redis, wake));
-    #   install SIGTERM/SIGINT handlers; close redis + Tortoise on exit.
-    raise NotImplementedError
+    configure_logging(settings)
+    await Tortoise.init(config=TORTOISE_ORM)
+    redis: Redis = aioredis.from_url(settings.redis_url)
+
+    wake = asyncio.Event()
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
+
+    listen_task = asyncio.create_task(_listen(wake))
+    drain_task = asyncio.create_task(_drainer(redis, wake))
+    logger.info("Relay started (stream='{}')", settings.relay_stream)
+    try:
+        await stop.wait()
+    finally:
+        logger.info("Relay shutting down")
+        for task in (listen_task, drain_task):
+            task.cancel()
+        await asyncio.gather(listen_task, drain_task, return_exceptions=True)
+        await redis.aclose()
+        await Tortoise.close_connections()
 
 
 def main() -> None:
