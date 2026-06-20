@@ -21,8 +21,11 @@ jobs:
     # Only deploy when the triggering CI run was green.
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     environment: staging
+    outputs:
+      deployed: ${{ steps.deploy.outcome == 'success' }}
     steps:
       - name: Pull latest main and rebuild on the host
+        id: deploy
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -42,3 +45,32 @@ jobs:
             docker compose up -d --build
             docker compose ps
             docker image prune -f
+
+  e2e:
+    name: E2E (post-deploy, staging)
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-groups
+
+      - name: Wait for staging to be healthy
+        run: |
+          for i in $(seq 1 24); do
+            status=$(curl -sf -A "hefest-e2e/1.0" \
+              https://hefest.adviz.bg/health \
+              -o /dev/null -w "%{http_code}" || echo 000)
+            [ "$status" = "200" ] && echo "Staging healthy" && exit 0
+            echo "Attempt $i: got $status, retrying in 10s..."
+            sleep 10
+          done
+          echo "Staging did not become healthy in time" && exit 1
+
+      - name: Run E2E suite against staging
+        env:
+          HEFEST_STAGING_URL: https://hefest.adviz.bg
+        run: uv run pytest tests/test_e2e_staging.py -v --tb=short
