@@ -10,6 +10,7 @@ from hefest.services.auth import (
     create_access_token,
     create_email_verify_token,
     hash_password,
+    user_id_from_access_token,
     verify_password,
 )
 
@@ -66,6 +67,27 @@ class TestEmailVerifyToken:
         assert payload["sub"] == str(user.id)
         assert payload["aud"] == "hefest-verify"
         assert payload["type"] == "email_verify"
+
+
+class TestUserIdFromAccessToken:
+    def test_valid_access_token_returns_sub(self) -> None:
+        """A valid access token yields its sub user_id."""
+        user = MagicMock()
+        user.id = "00000000-0000-0000-0000-000000000003"
+        user.role = "student"
+
+        assert user_id_from_access_token(create_access_token(user)) == str(user.id)
+
+    def test_wrong_token_type_returns_none(self) -> None:
+        """A non-access token (e.g. email-verify) is rejected."""
+        user = MagicMock()
+        user.id = "00000000-0000-0000-0000-000000000004"
+
+        assert user_id_from_access_token(create_email_verify_token(user)) is None
+
+    def test_garbage_token_returns_none(self) -> None:
+        """An undecodable token returns None instead of raising."""
+        assert user_id_from_access_token("not-a-jwt") is None
 
 
 class TestHashToken:

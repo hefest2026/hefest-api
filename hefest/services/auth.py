@@ -245,6 +245,53 @@ async def revoke_all_for_user(user_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Authentication helpers for logout-all (cookie or Bearer)
+# ---------------------------------------------------------------------------
+
+
+def user_id_from_access_token(token: str) -> str | None:
+    """Return the subject user_id of a valid access JWT, or None if invalid.
+
+    Args:
+        token: The raw Bearer access token.
+
+    Returns:
+        The user_id string from the ``sub`` claim, or None if the token is
+        invalid, expired, or not an access token.
+    """
+    try:
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=[settings.jwt_algorithm],
+            audience=settings.jwt_audience,
+        )
+    except jwt.PyJWTError:
+        return None
+    if payload.get("type") != "access":
+        return None
+    return payload.get("sub")
+
+
+async def user_id_for_active_refresh_token(raw_token: str) -> str | None:
+    """Return the owner user_id of an active (unrevoked, unexpired) refresh token.
+
+    Args:
+        raw_token: The raw (unhashed) refresh token from the client.
+
+    Returns:
+        The owning user_id string, or None if the token is unknown, revoked,
+        or expired.
+    """
+    record = await RefreshToken.get_or_none(
+        token_hash=_hash_token(raw_token), revoked_at=None
+    )
+    if record is None or record.expires_at < datetime.now(UTC):
+        return None
+    return str(record.user_id)  # ty: ignore[unresolved-attribute]
+
+
+# ---------------------------------------------------------------------------
 # Set refresh cookie
 # ---------------------------------------------------------------------------
 
