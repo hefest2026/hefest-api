@@ -327,6 +327,15 @@ class TestRefresh:
 
 
 class TestLogout:
+    @pytest.fixture(scope="class", autouse=True)
+    def _flush_login_ratelimit(self, client: httpx.Client) -> None:
+        """Reset per-IP rate-limit keys before this login-heavy class.
+
+        The preceding classes consume most of the 10/60s login window; the
+        logout-all coverage below needs several fresh logins of its own.
+        """
+        client.delete("/internal/flush-ratelimit")
+
     def _do_login(
         self,
         client: httpx.Client,
