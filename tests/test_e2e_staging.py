@@ -381,8 +381,8 @@ class TestLogout:
         verified_user: dict[str, str],
     ) -> None:
         """logout-all works from a browser session holding only the refresh cookie."""
-        login = self._do_login(client, verified_user)
-        r = client.post("/auth/logout-all", cookies=login.cookies)
+        raw = str(self._do_login(client, verified_user).cookies["hefest_refresh"])
+        r = client.post("/auth/logout-all", cookies={"hefest_refresh": raw})
         assert r.status_code == 204
 
     def test_logout_all_cookie_revokes_all_sessions(
@@ -391,11 +391,17 @@ class TestLogout:
         verified_user: dict[str, str],
     ) -> None:
         """logout-all via cookie revokes refresh tokens issued to other sessions."""
-        first = self._do_login(client, verified_user).cookies
-        second = self._do_login(client, verified_user).cookies
-        assert client.post("/auth/logout-all", cookies=second).status_code == 204
+        first = str(self._do_login(client, verified_user).cookies["hefest_refresh"])
+        second = str(self._do_login(client, verified_user).cookies["hefest_refresh"])
+        assert (
+            client.post(
+                "/auth/logout-all", cookies={"hefest_refresh": second}
+            ).status_code
+            == 204
+        )
         # the first session's refresh token must now be rejected too
-        assert client.post("/auth/refresh", cookies=first).status_code == 401
+        with _refresh_client(first) as c:
+            assert c.post("/auth/refresh").status_code == 401
 
     def test_logout_all_no_auth_401(self, client: httpx.Client) -> None:
         assert client.post("/auth/logout-all").status_code == 401
