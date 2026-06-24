@@ -6,7 +6,7 @@ All Tortoise ORM calls are mocked so no database is required.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,7 +18,7 @@ from hefest.models.user import UserRole
 from hefest.schemas.event import EventCreateRequest, EventUpdateRequest
 from hefest.services import event as svc
 
-UTC = timezone.utc
+UTC = UTC
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -106,7 +106,10 @@ class TestListEvents:
 
     async def test_organizer_sees_own_and_published(self) -> None:
         organizer = _user(UserRole.organizer)
-        events = [_event(organizer_id=organizer.id), _event(status=EventStatus.published)]
+        events = [
+            _event(organizer_id=organizer.id),
+            _event(status=EventStatus.published),
+        ]
 
         mock_qs = MagicMock()
         mock_qs.all = AsyncMock(return_value=events)
