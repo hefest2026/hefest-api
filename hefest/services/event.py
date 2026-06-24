@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from tortoise.expressions import Q
+from tortoise.functions import Count
 
 from hefest.models.event import Event, EventStatus
-from hefest.models.registration import Registration, RegistrationStatus
 from hefest.models.user import User, UserRole
 from hefest.schemas.event import (
     EventCreateRequest,
     EventDetailResponse,
     EventUpdateRequest,
 )
+
+_LOCATION_LOCK_HOURS = 2
+"""Hours before event start after which the location can no longer be changed."""
+
+# Fields that are nullable in the DB and can be explicitly cleared to None.
+_NULLABLE_FIELDS: frozenset[str] = frozenset({"ends_at"})
 
 
 async def create_event(organizer: User, data: EventCreateRequest) -> Event:
@@ -42,8 +49,8 @@ async def create_event(organizer: User, data: EventCreateRequest) -> Event:
 async def list_events(user: User) -> list[Event]:
     """Return events visible to the caller.
 
-    Students see only published events. Organizers see their own drafts and
-    all published events.
+    Students see only published events. Organizers see their own events plus
+    all published events from other organizers.
 
     Args:
         user: The authenticated user.
@@ -60,8 +67,9 @@ async def list_events(user: User) -> list[Event]:
 async def get_event_detail(user: User, event_id: UUID) -> EventDetailResponse:
     """Fetch a single event with confirmed count and waitlist size.
 
-    Students can only see published events. Organizers can see their own
-    drafts and any published event.
+    All three values (event + both counts) are fetched in a single query via
+    annotated COUNT aggregates. Students see published events only; organizers
+    see their own drafts and any published event.
 
     Args:
         user: The authenticated user.
@@ -71,22 +79,28 @@ async def get_event_detail(user: User, event_id: UUID) -> EventDetailResponse:
         EventDetailResponse with live seat counts.
 
     Raises:
-        HTTPException 404: If the event is not found or not visible to the caller.
+        HTTPException 404: If the event is not found or not visible.
     """
-    event = await Event.get_or_none(id=event_id)
+    event = await (
+        Event.filter(id=event_id)
+        .annotate(
+            confirmed_count=Count(
+                "registrations__id",
+                _filter=Q(registrations__status="confirmed"),
+            ),
+            waitlist_count=Count(
+                "registrations__id",
+                _filter=Q(registrations__status="waitlisted"),
+            ),
+        )
+        .first()
+    )
     if event is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
         )
 
     _assert_visible(user, event)
-
-    confirmed_count = await Registration.filter(
-        event=event, status=RegistrationStatus.confirmed
-    ).count()
-    waitlist_count = await Registration.filter(
-        event=event, status=RegistrationStatus.waitlisted
-    ).count()
 
     return EventDetailResponse(
         id=event.id,
@@ -100,13 +114,19 @@ async def get_event_detail(user: User, event_id: UUID) -> EventDetailResponse:
         status=event.status,
         created_at=event.created_at,
         updated_at=event.updated_at,
-        confirmed_count=confirmed_count,
-        waitlist_count=waitlist_count,
+        confirmed_count=event.confirmed_count,  # type: ignore[attr-defined]
+        waitlist_count=event.waitlist_count,  # type: ignore[attr-defined]
     )
 
 
 async def update_event(user: User, event_id: UUID, data: EventUpdateRequest) -> Event:
-    """Update a DRAFT event owned by the caller.
+    """Update an event owned by the caller.
+
+    All fields may be changed regardless of event status, with one exception:
+    the location cannot be changed within 2 hours of the event start.
+
+    Partial updates are supported — only fields present in the request body
+    are written. Send ``null`` for ``ends_at`` to clear it.
 
     Args:
         user: The authenticated organizer.
@@ -117,29 +137,41 @@ async def update_event(user: User, event_id: UUID, data: EventUpdateRequest) -> 
         The updated Event.
 
     Raises:
-        HTTPException 404: If the event is not found.
-        HTTPException 403: If the caller does not own the event.
-        HTTPException 409: If the event is not in DRAFT status.
+        HTTPException 404: If the event is not found or not owned by the caller.
+        HTTPException 409: If the location is being changed within 2 hours of start.
     """
-    event = await _get_owned_draft(user, event_id)
+    event = await Event.filter(id=event_id).select_for_update().get_or_none()
+    if event is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
+        )
+    _assert_owner(user, event)
 
-    update_fields: list[str] = []
-    for field in (
-        "title",
-        "description",
-        "starts_at",
-        "ends_at",
-        "location",
-        "capacity",
-    ):
-        value = getattr(data, field)
-        if value is not None:
-            setattr(event, field, value)
-            update_fields.append(field)
+    # Build dict of explicitly provided fields only.
+    # None is allowed only for fields that are nullable in the DB.
+    update_data: dict[str, object] = {
+        k: v
+        for k, v in data.model_dump(include=data.model_fields_set).items()
+        if v is not None or k in _NULLABLE_FIELDS
+    }
 
-    if update_fields:
-        update_fields.append("updated_at")
-        await event.save(update_fields=update_fields)
+    if "location" in update_data:
+        cutoff = datetime.now(UTC) + timedelta(hours=_LOCATION_LOCK_HOURS)
+        starts_at = event.starts_at
+        if starts_at.tzinfo is None:
+            starts_at = starts_at.replace(tzinfo=UTC)
+        if starts_at <= cutoff:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"location cannot be changed within {_LOCATION_LOCK_HOURS} hours "
+                    "of the event start"
+                ),
+            )
+
+    if update_data:
+        event.update_from_dict(update_data)
+        await event.save(update_fields=list(update_data.keys()))
 
     return event
 
@@ -155,8 +187,7 @@ async def publish_event(user: User, event_id: UUID) -> Event:
         The updated Event with status PUBLISHED.
 
     Raises:
-        HTTPException 404: If the event is not found.
-        HTTPException 403: If the caller does not own the event.
+        HTTPException 404: If the event is not found or not owned by the caller.
         HTTPException 409: If the event is not in DRAFT status.
     """
     event = await _get_owned_draft(user, event_id)
@@ -168,8 +199,9 @@ async def publish_event(user: User, event_id: UUID) -> Event:
 async def cancel_event(user: User, event_id: UUID) -> Event:
     """Cancel an event owned by the caller.
 
-    A published event can be cancelled; a draft can also be cancelled.
-    Already cancelled events are idempotent (return as-is).
+    Both draft and published events can be cancelled. Already cancelled events
+    are returned as-is (idempotent). Past events (starts_at in the past)
+    cannot be cancelled.
 
     Args:
         user: The authenticated organizer.
@@ -179,8 +211,8 @@ async def cancel_event(user: User, event_id: UUID) -> Event:
         The updated Event with status CANCELLED.
 
     Raises:
-        HTTPException 404: If the event is not found.
-        HTTPException 403: If the caller does not own the event.
+        HTTPException 404: If the event is not found or not owned by the caller.
+        HTTPException 409: If the event has already started.
     """
     event = await Event.get_or_none(id=event_id)
     if event is None:
@@ -191,6 +223,15 @@ async def cancel_event(user: User, event_id: UUID) -> Event:
 
     if event.status == EventStatus.cancelled:
         return event
+
+    starts_at = event.starts_at
+    if starts_at.tzinfo is None:
+        starts_at = starts_at.replace(tzinfo=UTC)
+    if starts_at <= datetime.now(UTC):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="cannot cancel an event that has already started",
+        )
 
     event.status = EventStatus.cancelled
     await event.save(update_fields=["status", "updated_at"])
@@ -205,7 +246,7 @@ async def cancel_event(user: User, event_id: UUID) -> Event:
 def _assert_visible(user: User, event: Event) -> None:
     """Raise 404 if the event is not visible to the caller.
 
-    Students see published only. Organizers see own drafts + any published.
+    Students see published only. Organizers see own events + any published.
     """
     if user.role == UserRole.student:
         if event.status != EventStatus.published:
@@ -213,21 +254,21 @@ def _assert_visible(user: User, event: Event) -> None:
                 status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
             )
     else:
-        # Organizer: own event OR published
-        if event.status != EventStatus.published and str(event.organizer_id) != str(
-            user.id
-        ):
+        if event.status != EventStatus.published and event.organizer_id != user.id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
             )
 
 
 def _assert_owner(user: User, event: Event) -> None:
-    """Raise 403 if the caller does not own the event."""
-    if str(event.organizer_id) != str(user.id):
+    """Raise 404 if the caller does not own the event.
+
+    Returns 404 (not 403) to avoid leaking the existence of resources the
+    caller has no access to.
+    """
+    if event.organizer_id != user.id:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="you do not own this event",
+            status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
         )
 
 
@@ -242,8 +283,7 @@ async def _get_owned_draft(user: User, event_id: UUID) -> Event:
         The Event in DRAFT status owned by the caller.
 
     Raises:
-        HTTPException 404: If not found.
-        HTTPException 403: If not the owner.
+        HTTPException 404: If not found or not owned by the caller.
         HTTPException 409: If not in DRAFT.
     """
     event = await Event.get_or_none(id=event_id)

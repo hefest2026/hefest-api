@@ -6,7 +6,7 @@ All Tortoise ORM calls are mocked so no database is required.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,7 +18,7 @@ from hefest.models.user import UserRole
 from hefest.schemas.event import EventCreateRequest, EventUpdateRequest
 from hefest.services import event as svc
 
-UTC = UTC
+UTC = timezone.utc
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -35,6 +35,7 @@ def _user(role: UserRole = UserRole.organizer, user_id: str | None = None) -> Ma
 def _event(
     organizer_id: uuid.UUID | None = None,
     status: EventStatus = EventStatus.draft,
+    starts_at: datetime | None = None,
 ) -> MagicMock:
     e = MagicMock()
     e.id = uuid.uuid4()
@@ -42,7 +43,7 @@ def _event(
     e.status = status
     e.title = "Test Event"
     e.description = ""
-    e.starts_at = datetime(2026, 9, 1, tzinfo=UTC)
+    e.starts_at = starts_at or datetime(2026, 9, 1, tzinfo=UTC)
     e.ends_at = None
     e.location = "Hall A"
     e.capacity = 50
@@ -106,10 +107,7 @@ class TestListEvents:
 
     async def test_organizer_sees_own_and_published(self) -> None:
         organizer = _user(UserRole.organizer)
-        events = [
-            _event(organizer_id=organizer.id),
-            _event(status=EventStatus.published),
-        ]
+        events = [_event(organizer_id=organizer.id), _event(status=EventStatus.published)]
 
         mock_qs = MagicMock()
         mock_qs.all = AsyncMock(return_value=events)
@@ -146,7 +144,7 @@ class TestPublishEvent:
 
         assert exc.value.status_code == 404
 
-    async def test_wrong_owner_raises_403(self) -> None:
+    async def test_wrong_owner_raises_404(self) -> None:
         organizer = _user(UserRole.organizer)
         evt = _event(organizer_id=uuid.uuid4(), status=EventStatus.draft)
 
@@ -154,7 +152,7 @@ class TestPublishEvent:
             with pytest.raises(HTTPException) as exc:
                 await svc.publish_event(organizer, evt.id)
 
-        assert exc.value.status_code == 403
+        assert exc.value.status_code == 404
 
     async def test_already_published_raises_409(self) -> None:
         organizer = _user(UserRole.organizer)
@@ -194,7 +192,7 @@ class TestCancelEvent:
         assert result.status == EventStatus.cancelled
         evt.save.assert_not_awaited()
 
-    async def test_wrong_owner_raises_403(self) -> None:
+    async def test_wrong_owner_raises_404(self) -> None:
         organizer = _user(UserRole.organizer)
         evt = _event(organizer_id=uuid.uuid4(), status=EventStatus.published)
 
@@ -202,7 +200,19 @@ class TestCancelEvent:
             with pytest.raises(HTTPException) as exc:
                 await svc.cancel_event(organizer, evt.id)
 
-        assert exc.value.status_code == 403
+        assert exc.value.status_code == 404
+
+    async def test_past_event_raises_409(self) -> None:
+        organizer = _user(UserRole.organizer)
+        past = datetime(2020, 1, 1, tzinfo=UTC)
+        evt = _event(organizer_id=organizer.id, status=EventStatus.published, starts_at=past)
+        evt.save = AsyncMock()
+
+        with patch.object(svc.Event, "get_or_none", new=AsyncMock(return_value=evt)):
+            with pytest.raises(HTTPException) as exc:
+                await svc.cancel_event(organizer, evt.id)
+
+        assert exc.value.status_code == 409
 
 
 # ---------------------------------------------------------------------------
@@ -211,28 +221,99 @@ class TestCancelEvent:
 
 
 class TestUpdateEvent:
+    def _mock_filter_chain(self, evt: Any) -> MagicMock:
+        """Build a mock for Event.filter(...).select_for_update().get_or_none()."""
+        qs = MagicMock()
+        qs.select_for_update.return_value = qs
+        qs.get_or_none = AsyncMock(return_value=evt)
+        return qs
+
     async def test_partial_update_applies_fields(self) -> None:
         organizer = _user(UserRole.organizer)
         evt = _event(organizer_id=organizer.id, status=EventStatus.draft)
         evt.save = AsyncMock()
+        evt.update_from_dict = MagicMock()
 
         data = EventUpdateRequest(title="New Title", capacity=200)
 
-        with patch.object(svc.Event, "get_or_none", new=AsyncMock(return_value=evt)):
-            result = await svc.update_event(organizer, evt.id, data)
+        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
+            await svc.update_event(organizer, evt.id, data)
 
-        assert result.title == "New Title"
-        assert result.capacity == 200
+        called_dict = evt.update_from_dict.call_args[0][0]
+        assert called_dict == {"title": "New Title", "capacity": 200}
 
-    async def test_update_on_published_raises_409(self) -> None:
+    async def test_update_on_published_is_allowed(self) -> None:
+        """Updates are no longer restricted to DRAFT events."""
         organizer = _user(UserRole.organizer)
         evt = _event(organizer_id=organizer.id, status=EventStatus.published)
+        evt.save = AsyncMock()
+        evt.update_from_dict = MagicMock()
 
-        with patch.object(svc.Event, "get_or_none", new=AsyncMock(return_value=evt)):
+        data = EventUpdateRequest(title="Updated")
+
+        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
+            await svc.update_event(organizer, evt.id, data)
+
+        evt.update_from_dict.assert_called_once()
+
+    async def test_wrong_owner_raises_404(self) -> None:
+        organizer = _user(UserRole.organizer)
+        evt = _event(organizer_id=uuid.uuid4(), status=EventStatus.draft)
+
+        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
             with pytest.raises(HTTPException) as exc:
                 await svc.update_event(organizer, evt.id, EventUpdateRequest(title="x"))
 
+        assert exc.value.status_code == 404
+
+    async def test_location_locked_within_2h_raises_409(self) -> None:
+        organizer = _user(UserRole.organizer)
+        soon = datetime.now(UTC) + timedelta(minutes=30)
+        evt = _event(organizer_id=organizer.id, status=EventStatus.published, starts_at=soon)
+        evt.save = AsyncMock()
+        evt.update_from_dict = MagicMock()
+
+        data = EventUpdateRequest(location="New Location")
+
+        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
+            with pytest.raises(HTTPException) as exc:
+                await svc.update_event(organizer, evt.id, data)
+
         assert exc.value.status_code == 409
+
+    async def test_ends_at_can_be_cleared_to_none(self) -> None:
+        """Explicitly sending ends_at=null clears it (nullable field)."""
+        organizer = _user(UserRole.organizer)
+        evt = _event(organizer_id=organizer.id, status=EventStatus.draft)
+        evt.ends_at = datetime(2026, 9, 2, tzinfo=UTC)
+        evt.save = AsyncMock()
+        evt.update_from_dict = MagicMock()
+
+        data = EventUpdateRequest.model_validate({"ends_at": None})
+        # model_fields_set must contain "ends_at" for the clear to take effect
+        assert "ends_at" in data.model_fields_set
+
+        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
+            await svc.update_event(organizer, evt.id, data)
+
+        called_dict = evt.update_from_dict.call_args[0][0]
+        assert "ends_at" in called_dict
+        assert called_dict["ends_at"] is None
+
+    async def test_omitted_fields_not_updated(self) -> None:
+        """Fields absent from the request body are not touched."""
+        organizer = _user(UserRole.organizer)
+        evt = _event(organizer_id=organizer.id, status=EventStatus.draft)
+        evt.save = AsyncMock()
+        evt.update_from_dict = MagicMock()
+
+        data = EventUpdateRequest(title="Only Title")
+
+        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
+            await svc.update_event(organizer, evt.id, data)
+
+        called_dict = evt.update_from_dict.call_args[0][0]
+        assert list(called_dict.keys()) == ["title"]
 
 
 # ---------------------------------------------------------------------------

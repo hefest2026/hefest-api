@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from hefest.models.event import EventStatus
+
+PositiveInt = Annotated[int, Field(ge=1)]
 
 
 class EventCreateRequest(BaseModel):
@@ -18,15 +21,7 @@ class EventCreateRequest(BaseModel):
     starts_at: datetime
     ends_at: datetime | None = None
     location: str
-    capacity: int
-
-    @field_validator("capacity")
-    @classmethod
-    def capacity_positive(cls, v: int) -> int:
-        """Validate capacity is at least 1."""
-        if v < 1:
-            raise ValueError("capacity must be at least 1")
-        return v
+    capacity: PositiveInt
 
     @model_validator(mode="after")
     def ends_after_starts(self) -> EventCreateRequest:
@@ -37,22 +32,18 @@ class EventCreateRequest(BaseModel):
 
 
 class EventUpdateRequest(BaseModel):
-    """Body for PUT /events/{id} — all fields optional."""
+    """Body for PUT /events/{id} — all fields optional.
+
+    Only include fields you want to change. ``ends_at`` accepts ``null`` to
+    clear a previously set end time; other fields ignore ``null``.
+    """
 
     title: str | None = None
     description: str | None = None
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     location: str | None = None
-    capacity: int | None = None
-
-    @field_validator("capacity")
-    @classmethod
-    def capacity_positive(cls, v: int | None) -> int | None:
-        """Validate capacity is at least 1 when provided."""
-        if v is not None and v < 1:
-            raise ValueError("capacity must be at least 1")
-        return v
+    capacity: Annotated[int, Field(ge=1)] | None = None
 
 
 class EventResponse(BaseModel):
