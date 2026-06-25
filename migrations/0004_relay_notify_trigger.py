@@ -18,6 +18,8 @@ class Migration(migrations.Migration):
     The channel name MUST match ``settings.relay_notify_channel`` ("hefest_jobs").
     """
 
+    dependencies = [("models", "0003_auto_20260619_1539")]
+
     operations = [
         ops.RunSQL(
             sql="""

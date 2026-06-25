@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Header, HTTPException, Response, status
 
 from hefest.config import settings
 from hefest.models.user import User, UserRole
-from hefest.routers.deps import get_current_user
 from hefest.schemas.auth import (
     LoginRequest,
     RegisterRequest,
@@ -145,8 +144,26 @@ async def logout(
 @router.post("/auth/logout-all", status_code=status.HTTP_204_NO_CONTENT)
 async def logout_all(
     response: Response,
-    current_user: User = Depends(get_current_user),
+    cookie_token: Annotated[str | None, Cookie(alias="hefest_refresh")] = None,
+    authorization: Annotated[str | None, Header()] = None,
 ) -> None:
-    """Revoke all refresh tokens for the current user."""
-    await auth_svc.revoke_all_for_user(str(current_user.id))
+    """Revoke all refresh tokens for the current user.
+
+    Authenticates via the ``hefest_refresh`` cookie (browser sessions) or an
+    ``Authorization: Bearer`` access token (mobile/API clients). The cookie is
+    preferred so a browser holding only the httpOnly refresh cookie can log out
+    of every device — mirroring ``/auth/logout``.
+    """
+    user_id: str | None = None
+    if cookie_token:
+        user_id = await auth_svc.user_id_for_active_refresh_token(cookie_token)
+    if user_id is None and authorization and authorization.startswith("Bearer "):
+        user_id = auth_svc.user_id_from_access_token(authorization[7:])
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    await auth_svc.revoke_all_for_user(user_id)
     response.delete_cookie(key=settings.refresh_cookie_name, path="/auth")

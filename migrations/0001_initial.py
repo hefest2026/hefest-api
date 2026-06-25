@@ -4,9 +4,8 @@ from uuid import uuid4
 
 from tortoise import fields, migrations
 from tortoise.fields.base import OnDelete
-from tortoise.indexes import Index, PartialIndex
+from tortoise.indexes import Index
 from tortoise.migrations import operations as ops
-from tortoise.migrations.constraints import UniqueConstraint
 
 from hefest.models.event import EventStatus
 from hefest.models.notification_job import JobStatus
@@ -29,7 +28,7 @@ class Migration(migrations.Migration):
                 ('created_at', fields.DatetimeField(auto_now=False, auto_now_add=True)),
                 ('updated_at', fields.DatetimeField(auto_now=True, auto_now_add=False)),
             ],
-            options={'table': 'notification_log', 'app': 'models', 'indexes': [PartialIndex(fields=['idempotency_key'], name='idx_log_processing', condition={'status': 'processing'})], 'pk_attr': 'id', 'table_description': 'Delivery log written by the C++ worker.'},
+            options={'table': 'notification_log', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Delivery log written by the C++ worker.'},
             bases=['Model'],
         ),
         ops.CreateModel(
@@ -60,7 +59,7 @@ class Migration(migrations.Migration):
                 ('created_at', fields.DatetimeField(auto_now=False, auto_now_add=True)),
                 ('updated_at', fields.DatetimeField(auto_now=True, auto_now_add=False)),
             ],
-            options={'table': 'events', 'app': 'models', 'indexes': [Index(fields=['organizer_id']), PartialIndex(fields=['status'], name='idx_events_published', condition={'status': 'published'})], 'pk_attr': 'id', 'table_description': 'A school event created by an organizer.'},
+            options={'table': 'events', 'app': 'models', 'indexes': [Index(fields=['organizer_id'])], 'pk_attr': 'id', 'table_description': 'A school event created by an organizer.'},
             bases=['Model'],
         ),
         ops.CreateModel(
@@ -75,7 +74,7 @@ class Migration(migrations.Migration):
                 ('created_at', fields.DatetimeField(auto_now=False, auto_now_add=True)),
                 ('updated_at', fields.DatetimeField(auto_now=True, auto_now_add=False)),
             ],
-            options={'table': 'notification_jobs', 'app': 'models', 'indexes': [PartialIndex(fields=['id'], name='idx_jobs_pending', condition={'status': 'pending'})], 'pk_attr': 'id', 'table_description': 'Transactional outbox row — bridges DB writes to Redis Streams.'},
+            options={'table': 'notification_jobs', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Transactional outbox row — bridges DB writes to Redis Streams.'},
             bases=['Model'],
         ),
         ops.CreateModel(
@@ -88,7 +87,7 @@ class Migration(migrations.Migration):
                 ('registered_at', fields.DatetimeField(auto_now=False, auto_now_add=True)),
                 ('cancelled_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=False)),
             ],
-            options={'table': 'registrations', 'app': 'models', 'indexes': [Index(fields=['event_id', 'status']), Index(fields=['student_id']), PartialIndex(fields=['event_id', 'registered_at'], name='idx_registrations_waitlist_fifo', condition={'status': 'waitlisted'})], 'constraints': [UniqueConstraint(fields=('event_id', 'student_id'), name='uq_one_active_registration_per_student', condition="status IN ('confirmed', 'waitlisted')")], 'pk_attr': 'id', 'table_description': "A student's registration for an event."},
+            options={'table': 'registrations', 'app': 'models', 'indexes': [Index(fields=['event_id', 'status']), Index(fields=['student_id'])], 'pk_attr': 'id', 'table_description': "A student's registration for an event."},
             bases=['Model'],
         ),
     ]

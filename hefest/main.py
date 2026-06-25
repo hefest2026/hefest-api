@@ -17,6 +17,7 @@ from hefest.config import TORTOISE_ORM, settings
 from hefest.logging import configure_logging
 from hefest.middleware.rate_limit import SLIDING_WINDOW_LUA, RateLimitMiddleware
 from hefest.routers.auth import router as auth_router
+from hefest.routers.internal import router as internal_router
 from hefest.routers.sso import router as sso_router
 
 configure_logging(settings)
@@ -65,6 +66,8 @@ app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxie
 
 app.include_router(auth_router)
 app.include_router(sso_router)
+if settings.env != "production":
+    app.include_router(internal_router)
 
 
 class HealthResponse(BaseModel):
