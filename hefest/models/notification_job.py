@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,7 @@ class NotificationJob(Model):
         related_name="notification_jobs",
         on_delete=fields.OnDelete.CASCADE,
     )
+    event_id: uuid.UUID
     event_type = fields.TextField()
     payload = fields.JSONField()
     status = fields.CharEnumField(JobStatus, max_length=16, default=JobStatus.pending)
