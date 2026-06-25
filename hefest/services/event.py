@@ -1,15 +1,16 @@
 """Event business logic."""
 
 from __future__ import annotations
-from typing import Protocol, cast
 
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from tortoise.expressions import Q
 from tortoise.functions import Count
 
+from hefest.config import settings
 from hefest.models.event import Event, EventStatus
 from hefest.models.user import User, UserRole
 from hefest.schemas.event import (
@@ -18,8 +19,6 @@ from hefest.schemas.event import (
     EventUpdateRequest,
 )
 
-_LOCATION_LOCK_HOURS = 2
-"""Hours before event start after which the location can no longer be changed."""
 
 class AnnotatedEvent(Event):
     confirmed_count: int
@@ -121,7 +120,7 @@ async def get_event_detail(user: User, event_id: UUID) -> EventDetailResponse:
         updated_at=annotated_event.updated_at,
 
         confirmed_count=annotated_event.confirmed_count,
-        waitlist_count=annotated_event.waitlist_count, 
+        waitlist_count=annotated_event.waitlist_count,
     )
 
 
@@ -157,17 +156,17 @@ async def update_event(user: User, event_id: UUID, data: EventUpdateRequest) -> 
     update_data = data.model_dump(exclude_unset=True)
 
     if "location" in update_data:
-        cutoff = datetime.now(UTC) + timedelta(hours=_LOCATION_LOCK_HOURS)
+        cutoff = datetime.now(UTC) + timedelta(hours=settings.event_location_lock_hours)
         starts_at = event.starts_at
         if starts_at.tzinfo is None:
             starts_at = starts_at.replace(tzinfo=UTC)
-            
+
         if starts_at <= cutoff:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    f"location cannot be changed within {_LOCATION_LOCK_HOURS} hours "
-                    "of the event start"
+                    f"location cannot be changed within "
+                    f"{settings.event_location_lock_hours} hours of the event start"
                 ),
             )
 
