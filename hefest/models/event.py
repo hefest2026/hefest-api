@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -28,6 +29,7 @@ class Event(Model):
         related_name="events",
         on_delete=fields.OnDelete.CASCADE,
     )
+    organizer_id: uuid.UUID
     title = fields.TextField()
     description = fields.TextField(default="")
     starts_at = fields.DatetimeField()
