@@ -31,6 +31,8 @@ BEGIN
 END;
 $$;
 
+DROP TRIGGER IF EXISTS trg_notify_pending_job ON notification_jobs;
+
 CREATE TRIGGER trg_notify_pending_job
     AFTER INSERT ON notification_jobs
     FOR EACH STATEMENT
