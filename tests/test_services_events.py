@@ -6,7 +6,7 @@ All Tortoise ORM calls are mocked so no database is required.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,7 +18,7 @@ from hefest.models.user import UserRole
 from hefest.schemas.event import EventCreateRequest, EventUpdateRequest
 from hefest.services import event as svc
 
-UTC = timezone.utc
+UTC = UTC
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -107,7 +107,10 @@ class TestListEvents:
 
     async def test_organizer_sees_own_and_published(self) -> None:
         organizer = _user(UserRole.organizer)
-        events = [_event(organizer_id=organizer.id), _event(status=EventStatus.published)]
+        events = [
+            _event(organizer_id=organizer.id),
+            _event(status=EventStatus.published),
+        ]
 
         mock_qs = MagicMock()
         mock_qs.all = AsyncMock(return_value=events)
@@ -205,7 +208,9 @@ class TestCancelEvent:
     async def test_past_event_raises_409(self) -> None:
         organizer = _user(UserRole.organizer)
         past = datetime(2020, 1, 1, tzinfo=UTC)
-        evt = _event(organizer_id=organizer.id, status=EventStatus.published, starts_at=past)
+        evt = _event(
+            organizer_id=organizer.id, status=EventStatus.published, starts_at=past
+        )
         evt.save = AsyncMock()
 
         with patch.object(svc.Event, "get_or_none", new=AsyncMock(return_value=evt)):
@@ -236,7 +241,9 @@ class TestUpdateEvent:
 
         data = EventUpdateRequest(title="New Title", capacity=200)
 
-        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
+        with patch.object(
+            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
+        ):
             await svc.update_event(organizer, evt.id, data)
 
         called_dict = evt.update_from_dict.call_args[0][0]
@@ -251,7 +258,9 @@ class TestUpdateEvent:
 
         data = EventUpdateRequest(title="Updated")
 
-        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
+        with patch.object(
+            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
+        ):
             await svc.update_event(organizer, evt.id, data)
 
         evt.update_from_dict.assert_called_once()
@@ -260,7 +269,9 @@ class TestUpdateEvent:
         organizer = _user(UserRole.organizer)
         evt = _event(organizer_id=uuid.uuid4(), status=EventStatus.draft)
 
-        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
+        with patch.object(
+            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
+        ):
             with pytest.raises(HTTPException) as exc:
                 await svc.update_event(organizer, evt.id, EventUpdateRequest(title="x"))
 
@@ -269,13 +280,17 @@ class TestUpdateEvent:
     async def test_location_locked_within_2h_raises_409(self) -> None:
         organizer = _user(UserRole.organizer)
         soon = datetime.now(UTC) + timedelta(minutes=30)
-        evt = _event(organizer_id=organizer.id, status=EventStatus.published, starts_at=soon)
+        evt = _event(
+            organizer_id=organizer.id, status=EventStatus.published, starts_at=soon
+        )
         evt.save = AsyncMock()
         evt.update_from_dict = MagicMock()
 
         data = EventUpdateRequest(location="New Location")
 
-        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
+        with patch.object(
+            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
+        ):
             with pytest.raises(HTTPException) as exc:
                 await svc.update_event(organizer, evt.id, data)
 
@@ -293,7 +308,9 @@ class TestUpdateEvent:
         # model_fields_set must contain "ends_at" for the clear to take effect
         assert "ends_at" in data.model_fields_set
 
-        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
+        with patch.object(
+            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
+        ):
             await svc.update_event(organizer, evt.id, data)
 
         called_dict = evt.update_from_dict.call_args[0][0]
@@ -309,7 +326,9 @@ class TestUpdateEvent:
 
         data = EventUpdateRequest(title="Only Title")
 
-        with patch.object(svc.Event, "filter", return_value=self._mock_filter_chain(evt)):
+        with patch.object(
+            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
+        ):
             await svc.update_event(organizer, evt.id, data)
 
         called_dict = evt.update_from_dict.call_args[0][0]

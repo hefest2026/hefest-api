@@ -1,6 +1,7 @@
 """Event business logic."""
 
 from __future__ import annotations
+from typing import Protocol, cast
 
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -22,6 +23,11 @@ _LOCATION_LOCK_HOURS = 2
 
 # Fields that are nullable in the DB and can be explicitly cleared to None.
 _NULLABLE_FIELDS: frozenset[str] = frozenset({"ends_at"})
+
+
+class AnnotatedEvent(Event):
+    confirmed_count: int
+    waitlist_count: int
 
 
 async def create_event(organizer: User, data: EventCreateRequest) -> Event:
@@ -95,27 +101,31 @@ async def get_event_detail(user: User, event_id: UUID) -> EventDetailResponse:
         )
         .first()
     )
+
     if event is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
         )
 
-    _assert_visible(user, event)
+    annotated_event = cast(AnnotatedEvent, event)
+
+    _assert_visible(user, annotated_event)
 
     return EventDetailResponse(
-        id=event.id,
-        organizer_id=event.organizer_id,
-        title=event.title,
-        description=event.description,
-        starts_at=event.starts_at,
-        ends_at=event.ends_at,
-        location=event.location,
-        capacity=event.capacity,
-        status=event.status,
-        created_at=event.created_at,
-        updated_at=event.updated_at,
-        confirmed_count=event.confirmed_count,  # type: ignore[attr-defined]
-        waitlist_count=event.waitlist_count,  # type: ignore[attr-defined]
+        id=annotated_event.id,
+        organizer_id=annotated_event.organizer_id,
+        title=annotated_event.title,
+        description=annotated_event.description,
+        starts_at=annotated_event.starts_at,
+        ends_at=annotated_event.ends_at,
+        location=annotated_event.location,
+        capacity=annotated_event.capacity,
+        status=annotated_event.status,
+        created_at=annotated_event.created_at,
+        updated_at=annotated_event.updated_at,
+
+        confirmed_count=annotated_event.confirmed_count,
+        waitlist_count=annotated_event.waitlist_count, 
     )
 
 
@@ -145,6 +155,7 @@ async def update_event(user: User, event_id: UUID, data: EventUpdateRequest) -> 
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
         )
+
     _assert_owner(user, event)
 
     # Build dict of explicitly provided fields only.
