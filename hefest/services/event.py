@@ -47,7 +47,7 @@ async def create_event(organizer: User, data: EventCreateRequest) -> Event:
     )
 
 
-async def list_events(user: User) -> list[Event]:
+async def list_events(user: User, *, limit: int = 100, offset: int = 0) -> list[Event]:
     """Return events visible to the caller.
 
     Students see only published events. Organizers see their own events plus
@@ -55,14 +55,26 @@ async def list_events(user: User) -> list[Event]:
 
     Args:
         user: The authenticated user.
+        limit: Maximum rows to return (default 100).
+        offset: Number of rows to skip.
 
     Returns:
-        List of visible Event objects.
+        List of visible Event objects ordered by start date descending.
     """
     if user.role == UserRole.student:
-        return await Event.filter(status=EventStatus.published).all()
+        return await (
+            Event.filter(status=EventStatus.published)
+            .order_by("-starts_at")
+            .offset(offset)
+            .limit(limit)
+        )
     # Organizer: own events (any status) OR any published event
-    return await Event.filter(Q(organizer=user) | Q(status=EventStatus.published)).all()
+    return await (
+        Event.filter(Q(organizer=user) | Q(status=EventStatus.published))
+        .order_by("-starts_at")
+        .offset(offset)
+        .limit(limit)
+    )
 
 
 async def get_event_detail(user: User, event_id: UUID) -> EventDetailResponse:

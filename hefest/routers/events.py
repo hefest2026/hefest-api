@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 
 from hefest.models.user import User, UserRole
 from hefest.routers.deps import get_current_user, require_role
@@ -33,13 +33,15 @@ async def create_event(
 
 @router.get("", response_model=list[EventResponse])
 async def list_events(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     user: User = Depends(get_current_user),
 ) -> list[EventResponse]:
     """List events visible to the caller.
 
     Students: published only. Organizers: own events + all published.
     """
-    events = await event_svc.list_events(user)
+    events = await event_svc.list_events(user, limit=limit, offset=offset)
     return [EventResponse.model_validate(e) for e in events]
 
 

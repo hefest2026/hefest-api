@@ -440,15 +440,14 @@ class TestListMyRegistrations:
         main_qs = MagicMock()
         main_qs.all = AsyncMock(return_value=[reg])
 
-        # Single grouped query returns FIFO-ordered (id, event_id) rows for the
-        # event. One student is ahead, so reg is second → position 2.
-        fifo_qs = _qs(values=[(uuid.uuid4(), event_id), (reg.id, event_id)])
+        # count() returns 2: 1 person registered before + reg itself.
+        count_qs = _qs(count=2)
 
-        with patch.object(svc.Registration, "filter", side_effect=[main_qs, fifo_qs]):
+        with patch.object(svc.Registration, "filter", side_effect=[main_qs, count_qs]):
             result = await svc.list_my_registrations(student)
 
         assert len(result) == 1
-        assert result[0].waitlist_position == 2  # 1 ahead + 1
+        assert result[0].waitlist_position == 2  # 1 ahead + self
 
     async def test_confirmed_has_no_position(self) -> None:
         student = _user()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 
 from hefest.models.user import User, UserRole
 from hefest.routers.deps import require_role
@@ -68,10 +68,14 @@ async def cancel_registration(
 )
 async def event_registrations(
     event_id: UUID,
+    limit: int = Query(500, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     organizer: User = Depends(_require_organizer),
 ) -> list[RegistrationSummary]:
     """List confirmed registrations for an organizer's own event."""
-    return await reg_svc.list_event_registrations(organizer, event_id)
+    return await reg_svc.list_event_registrations(
+        organizer, event_id, limit=limit, offset=offset
+    )
 
 
 @router.get(
@@ -80,9 +84,11 @@ async def event_registrations(
 )
 async def event_waitlist(
     event_id: UUID,
+    limit: int = Query(500, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     organizer: User = Depends(_require_organizer),
 ) -> list[RegistrationSummary]:
     """List the FIFO waitlist for an organizer's own event."""
     return await reg_svc.list_event_registrations(
-        organizer, event_id, waitlist_only=True
+        organizer, event_id, waitlist_only=True, limit=limit, offset=offset
     )

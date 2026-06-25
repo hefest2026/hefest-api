@@ -46,7 +46,7 @@ class Registration(Model):
             ("event_id", "status"),
             ("student_id",),
             PartialIndex(
-                fields=["event_id", "registered_at"],
+                fields=["event_id", "registered_at", "id"],
                 name="idx_registrations_waitlist_fifo",
                 condition={"status": "waitlisted"},
             ),

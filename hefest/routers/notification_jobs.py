@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from hefest.models.notification_job import NotificationJob
 from hefest.models.notification_log import NotificationLog
@@ -23,6 +23,8 @@ _require_organizer = require_role(UserRole.organizer)
 @router.get("", response_model=list[NotificationJobResponse])
 async def list_notification_jobs(
     event_id: UUID | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     organizer: User = Depends(_require_organizer),
 ) -> list[NotificationJobResponse]:
     """List outbox jobs for events owned by the current organizer.
@@ -33,7 +35,7 @@ async def list_notification_jobs(
     if event_id is not None:
         qs = qs.filter(event_id=event_id)
 
-    jobs = await qs.order_by("-created_at").all()
+    jobs = await qs.order_by("-created_at").offset(offset).limit(limit)
     return [NotificationJobResponse.model_validate(j) for j in jobs]
 
 

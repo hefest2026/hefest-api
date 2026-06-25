@@ -92,14 +92,18 @@ class TestCreateEvent:
 
 
 class TestListEvents:
+    def _paginated_qs(self, items: list[Any]) -> MagicMock:
+        qs = MagicMock()
+        qs.order_by.return_value = qs
+        qs.offset.return_value = qs
+        qs.limit = AsyncMock(return_value=items)
+        return qs
+
     async def test_student_sees_only_published(self) -> None:
         student = _user(UserRole.student)
         published = [_event(status=EventStatus.published)]
 
-        mock_qs = MagicMock()
-        mock_qs.all = AsyncMock(return_value=published)
-
-        with patch.object(svc.Event, "filter", return_value=mock_qs) as mock_filter:
+        with patch.object(svc.Event, "filter", return_value=self._paginated_qs(published)) as mock_filter:
             result = await svc.list_events(student)
 
         mock_filter.assert_called_once_with(status=EventStatus.published)
@@ -112,10 +116,7 @@ class TestListEvents:
             _event(status=EventStatus.published),
         ]
 
-        mock_qs = MagicMock()
-        mock_qs.all = AsyncMock(return_value=events)
-
-        with patch.object(svc.Event, "filter", return_value=mock_qs):
+        with patch.object(svc.Event, "filter", return_value=self._paginated_qs(events)):
             result = await svc.list_events(organizer)
 
         assert result == events

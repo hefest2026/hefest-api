@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from tortoise.exceptions import IntegrityError
+from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
 from hefest.models.event import Event, EventStatus
@@ -247,26 +248,18 @@ async def list_my_registrations(student: User) -> list[MyRegistrationResponse]:
         student=student, status__not=RegistrationStatus.cancelled
     ).all()
 
-    # Compute every waitlist position in a single grouped query instead of one
-    # count() per waitlisted registration. FIFO order (registered_at, id) matches
-    # the idx_registrations_waitlist_fifo partial index.
-    waitlisted_event_ids = {
-        reg.event_id for reg in regs if reg.status == RegistrationStatus.waitlisted
-    }
+    # One count() per waitlisted registration — avoids pulling the full waitlist
+    # into memory. The OR condition replicates (registered_at, id) FIFO ordering.
     positions: dict[UUID, int] = {}
-    if waitlisted_event_ids:
-        rows = await (
-            Registration.filter(
-                event_id__in=waitlisted_event_ids,
+    for reg in regs:
+        if reg.status == RegistrationStatus.waitlisted:
+            positions[reg.id] = await Registration.filter(
+                event_id=reg.event_id,
                 status=RegistrationStatus.waitlisted,
-            )
-            .order_by("event_id", "registered_at", "id")
-            .values_list("id", "event_id")
-        )
-        seen: dict[UUID, int] = {}
-        for reg_id, event_id in rows:
-            seen[event_id] = seen.get(event_id, 0) + 1
-            positions[reg_id] = seen[event_id]
+            ).filter(
+                Q(registered_at__lt=reg.registered_at)
+                | Q(registered_at=reg.registered_at, id__lte=reg.id)
+            ).count()
 
     return [
         MyRegistrationResponse(
@@ -286,6 +279,8 @@ async def list_event_registrations(
     event_id: UUID,
     *,
     waitlist_only: bool = False,
+    limit: int = 500,
+    offset: int = 0,
 ) -> list[RegistrationSummary]:
     """Return confirmed (or waitlisted) registrations for an organizer's event.
 
@@ -293,6 +288,8 @@ async def list_event_registrations(
         organizer: The authenticated organizer.
         event_id: Target event UUID.
         waitlist_only: If True return waitlisted rows ordered FIFO; else confirmed.
+        limit: Maximum rows to return (default 500).
+        offset: Number of rows to skip.
 
     Returns:
         List of RegistrationSummary objects.
@@ -313,5 +310,5 @@ async def list_event_registrations(
     if waitlist_only:
         qs = qs.order_by("registered_at", "id")
 
-    regs = await qs.all()
+    regs = await qs.offset(offset).limit(limit)
     return [RegistrationSummary.model_validate(r) for r in regs]
