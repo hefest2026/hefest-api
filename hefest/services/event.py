@@ -21,10 +21,6 @@ from hefest.schemas.event import (
 _LOCATION_LOCK_HOURS = 2
 """Hours before event start after which the location can no longer be changed."""
 
-# Fields that are nullable in the DB and can be explicitly cleared to None.
-_NULLABLE_FIELDS: frozenset[str] = frozenset({"ends_at"})
-
-
 class AnnotatedEvent(Event):
     confirmed_count: int
     waitlist_count: int
@@ -158,19 +154,14 @@ async def update_event(user: User, event_id: UUID, data: EventUpdateRequest) -> 
 
     _assert_owner(user, event)
 
-    # Build dict of explicitly provided fields only.
-    # None is allowed only for fields that are nullable in the DB.
-    update_data: dict[str, object] = {
-        k: v
-        for k, v in data.model_dump(include=data.model_fields_set).items()
-        if v is not None or k in _NULLABLE_FIELDS
-    }
+    update_data = data.model_dump(exclude_unset=True)
 
     if "location" in update_data:
         cutoff = datetime.now(UTC) + timedelta(hours=_LOCATION_LOCK_HOURS)
         starts_at = event.starts_at
         if starts_at.tzinfo is None:
             starts_at = starts_at.replace(tzinfo=UTC)
+            
         if starts_at <= cutoff:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
