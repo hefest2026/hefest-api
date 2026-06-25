@@ -118,7 +118,6 @@ async def get_event_detail(user: User, event_id: UUID) -> EventDetailResponse:
         status=annotated_event.status,
         created_at=annotated_event.created_at,
         updated_at=annotated_event.updated_at,
-
         confirmed_count=annotated_event.confirmed_count,
         waitlist_count=annotated_event.waitlist_count,
     )

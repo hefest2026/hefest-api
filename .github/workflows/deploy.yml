@@ -1,13 +1,17 @@
 name: Deploy
 
-# Runs only after the CI workflow finishes successfully on main, i.e. once a PR
-# has been merged. The host, user, port and SSH key all come from secrets, so the
-# server IP never appears in this file or in the logs.
+# Triggers:
+#   - push to main (post-merge) → deploys origin/main
+#   - PR dev→main updated/opened (CI ran on the dev head) → deploys origin/dev
+#
+# workflow_run branches filter matches the HEAD branch of the triggering event,
+# so we need both "main" (push) and "dev" (pull_request head) listed.
+# The job-level condition then narrows to only the two relevant combinations.
 on:
   workflow_run:
     workflows: [CI]
     types: [completed]
-    branches: [main]
+    branches: [main, dev]
 
 # Never run two staging deploys at once; let an in-flight deploy finish.
 concurrency:
@@ -18,20 +22,36 @@ jobs:
   deploy:
     name: Deploy to staging
     runs-on: ubuntu-latest
-    # Only deploy when the triggering CI run was green.
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Fire on: green CI after a push to main, OR green CI after a PR whose head is dev.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' && (
+        (github.event.workflow_run.event == 'push'         && github.event.workflow_run.head_branch == 'main') ||
+        (github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_branch == 'dev')
+      )
     environment: staging
     outputs:
       deployed: ${{ steps.deploy.outcome == 'success' }}
     steps:
-      - name: Pull latest main and rebuild on the host
+      - name: Resolve deploy ref
+        id: ref
+        run: |
+          if [ "${{ github.event.workflow_run.head_branch }}" = "main" ]; then
+            echo "value=origin/main" >> $GITHUB_OUTPUT
+          else
+            echo "value=origin/dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Pull and rebuild on the host
         id: deploy
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          DEPLOY_REF: ${{ steps.ref.outputs.value }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || '22' }}
+          envs: DEPLOY_REF
           script_stop: true
           # COMPOSE_FILE makes every `docker compose` call use the staging
           # stack (Traefik on :8067, Postgres/Redis not exposed).
@@ -40,7 +60,7 @@ jobs:
             export COMPOSE_FILE=compose.staging.yml
             cd /opt/hefest/hefest-api
             git fetch --prune origin
-            git reset --hard origin/main
+            git reset --hard "$DEPLOY_REF"
             cd /opt/hefest/hefest-compose
             docker compose up -d --build
             docker compose ps
