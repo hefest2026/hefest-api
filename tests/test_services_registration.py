@@ -87,7 +87,13 @@ def _mock_tx() -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
-def _qs(*, get: Any = None, count: int = 0, first: Any = None) -> MagicMock:
+def _qs(
+    *,
+    get: Any = None,
+    count: int = 0,
+    first: Any = None,
+    values: list[Any] | None = None,
+) -> MagicMock:
     """Build a mock queryset that supports common chaining methods."""
     qs = MagicMock()
     qs.using_db.return_value = qs
@@ -95,9 +101,11 @@ def _qs(*, get: Any = None, count: int = 0, first: Any = None) -> MagicMock:
     qs.order_by.return_value = qs
     qs.filter.return_value = qs
     qs.get_or_none = AsyncMock(return_value=get)
+    qs.get = AsyncMock(return_value=get)
     qs.count = AsyncMock(return_value=count)
     qs.first = AsyncMock(return_value=first)
     qs.all = AsyncMock(return_value=[])
+    qs.values_list = AsyncMock(return_value=values or [])
     return qs
 
 
@@ -276,11 +284,12 @@ class TestCancelRegistration:
 
         reg_qs = _qs(get=reg)
         event_qs = _qs(get=evt)
+        relock_qs = _qs(get=reg)  # re-read under the event lock
         waitlist_qs = _qs(first=next_wl)
         job_create = AsyncMock()
 
         idx = 0
-        order = [reg_qs, event_qs, waitlist_qs]
+        order = [reg_qs, event_qs, relock_qs, waitlist_qs]
 
         def _pick(*_a: Any, **_kw: Any) -> MagicMock:
             nonlocal idx
@@ -321,10 +330,11 @@ class TestCancelRegistration:
 
         reg_qs = _qs(get=reg)
         event_qs = _qs(get=evt)
+        relock_qs = _qs(get=reg)  # re-read under the event lock
         # No further waitlisted to promote — but the query shouldn't run at all
         job_create = AsyncMock()
 
-        order = [reg_qs, event_qs]
+        order = [reg_qs, event_qs, relock_qs]
         idx = 0
 
         def _pick(*_a: Any, **_kw: Any) -> MagicMock:
@@ -389,7 +399,8 @@ class TestCancelRegistration:
 
         reg_qs = _qs(get=reg)
         event_qs = _qs(get=evt)
-        order = [reg_qs, event_qs]
+        relock_qs = _qs(get=reg)  # re-read under the event lock
+        order = [reg_qs, event_qs, relock_qs]
         idx = 0
 
         def _pick(*_a: Any, **_kw: Any) -> MagicMock:
@@ -426,21 +437,14 @@ class TestListMyRegistrations:
         )
         reg.event_id = event_id
 
-        # 1 student is ahead in the waitlist
-        ahead_qs = _qs(count=1)
-        ahead_qs.all = AsyncMock(return_value=[reg])
-
         main_qs = MagicMock()
         main_qs.all = AsyncMock(return_value=[reg])
 
-        def _filter(*_a: Any, **_kw: Any) -> MagicMock:
-            return ahead_qs
+        # Single grouped query returns FIFO-ordered (id, event_id) rows for the
+        # event. One student is ahead, so reg is second → position 2.
+        fifo_qs = _qs(values=[(uuid.uuid4(), event_id), (reg.id, event_id)])
 
-        with (
-            patch.object(svc.Registration, "filter", side_effect=[main_qs, ahead_qs]),
-        ):
-            main_qs.all = AsyncMock(return_value=[reg])
-            ahead_qs.count = AsyncMock(return_value=1)
+        with patch.object(svc.Registration, "filter", side_effect=[main_qs, fifo_qs]):
             result = await svc.list_my_registrations(student)
 
         assert len(result) == 1

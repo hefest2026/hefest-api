@@ -161,6 +161,18 @@ async def cancel_registration(student: User, reg_id: UUID) -> Registration:
                 status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
             )
 
+        # Re-read the registration under the event lock so the cancellation
+        # decision uses committed state, not the stale pre-lock snapshot. Guards
+        # against a concurrent double-cancel of the same row promoting twice.
+        reg = await (
+            Registration.filter(id=reg_id).using_db(conn).select_for_update().get()
+        )
+        if reg.status == RegistrationStatus.cancelled:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="registration already cancelled",
+            )
+
         starts_at = event.starts_at
         if starts_at.tzinfo is None:
             starts_at = starts_at.replace(tzinfo=UTC)
@@ -184,7 +196,7 @@ async def cancel_registration(student: User, reg_id: UUID) -> Registration:
                     status=RegistrationStatus.waitlisted,
                 )
                 .using_db(conn)
-                .order_by("registered_at")
+                .order_by("registered_at", "id")
                 .first()
             )
             if next_waitlisted is not None:
@@ -235,29 +247,38 @@ async def list_my_registrations(student: User) -> list[MyRegistrationResponse]:
         student=student, status__not=RegistrationStatus.cancelled
     ).all()
 
-    result: list[MyRegistrationResponse] = []
-    for reg in regs:
-        position: int | None = None
-        if reg.status == RegistrationStatus.waitlisted:
-            ahead = await Registration.filter(
-                event_id=reg.event_id,
+    # Compute every waitlist position in a single grouped query instead of one
+    # count() per waitlisted registration. FIFO order (registered_at, id) matches
+    # the idx_registrations_waitlist_fifo partial index.
+    waitlisted_event_ids = {
+        reg.event_id for reg in regs if reg.status == RegistrationStatus.waitlisted
+    }
+    positions: dict[UUID, int] = {}
+    if waitlisted_event_ids:
+        rows = await (
+            Registration.filter(
+                event_id__in=waitlisted_event_ids,
                 status=RegistrationStatus.waitlisted,
-                registered_at__lt=reg.registered_at,
-            ).count()
-            position = ahead + 1
-
-        result.append(
-            MyRegistrationResponse(
-                id=reg.id,
-                event_id=reg.event_id,
-                status=reg.status,
-                registered_at=reg.registered_at,
-                cancelled_at=reg.cancelled_at,
-                waitlist_position=position,
             )
+            .order_by("event_id", "registered_at", "id")
+            .values_list("id", "event_id")
         )
+        seen: dict[UUID, int] = {}
+        for reg_id, event_id in rows:
+            seen[event_id] = seen.get(event_id, 0) + 1
+            positions[reg_id] = seen[event_id]
 
-    return result
+    return [
+        MyRegistrationResponse(
+            id=reg.id,
+            event_id=reg.event_id,
+            status=reg.status,
+            registered_at=reg.registered_at,
+            cancelled_at=reg.cancelled_at,
+            waitlist_position=positions.get(reg.id),
+        )
+        for reg in regs
+    ]
 
 
 async def list_event_registrations(
@@ -290,7 +311,7 @@ async def list_event_registrations(
     )
     qs = Registration.filter(event_id=event_id, status=filter_status)
     if waitlist_only:
-        qs = qs.order_by("registered_at")
+        qs = qs.order_by("registered_at", "id")
 
     regs = await qs.all()
     return [RegistrationSummary.model_validate(r) for r in regs]
