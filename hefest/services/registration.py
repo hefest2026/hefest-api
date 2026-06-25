@@ -253,13 +253,17 @@ async def list_my_registrations(student: User) -> list[MyRegistrationResponse]:
     positions: dict[UUID, int] = {}
     for reg in regs:
         if reg.status == RegistrationStatus.waitlisted:
-            positions[reg.id] = await Registration.filter(
-                event_id=reg.event_id,
-                status=RegistrationStatus.waitlisted,
-            ).filter(
-                Q(registered_at__lt=reg.registered_at)
-                | Q(registered_at=reg.registered_at, id__lte=reg.id)
-            ).count()
+            positions[reg.id] = (
+                await Registration.filter(
+                    event_id=reg.event_id,
+                    status=RegistrationStatus.waitlisted,
+                )
+                .filter(
+                    Q(registered_at__lt=reg.registered_at)
+                    | Q(registered_at=reg.registered_at, id__lte=reg.id)
+                )
+                .count()
+            )
 
     return [
         MyRegistrationResponse(

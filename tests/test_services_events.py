@@ -103,7 +103,9 @@ class TestListEvents:
         student = _user(UserRole.student)
         published = [_event(status=EventStatus.published)]
 
-        with patch.object(svc.Event, "filter", return_value=self._paginated_qs(published)) as mock_filter:
+        with patch.object(
+            svc.Event, "filter", return_value=self._paginated_qs(published)
+        ) as mock_filter:
             result = await svc.list_events(student)
 
         mock_filter.assert_called_once_with(status=EventStatus.published)
