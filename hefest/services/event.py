@@ -67,26 +67,20 @@ async def list_events(user: User, *, limit: int = 100, offset: int = 0) -> list[
         _filter=Q(registrations__status="confirmed"),
     )
     if user.role == UserRole.student:
-        return cast(
-            list[Event],
-            await (
-                Event.filter(status=EventStatus.published)
-                .annotate(confirmed_count=confirmed_annotation)
-                .order_by("-starts_at")
-                .offset(offset)
-                .limit(limit)
-            ),
-        )
-    # Organizer: own events (any status) OR any published event
-    return cast(
-        list[Event],
-        await (
-            Event.filter(Q(organizer=user) | Q(status=EventStatus.published))
+        return await (
+            Event.filter(status=EventStatus.published)
             .annotate(confirmed_count=confirmed_annotation)
             .order_by("-starts_at")
             .offset(offset)
             .limit(limit)
-        ),
+        )
+    # Organizer: own events (any status) OR any published event
+    return await (
+        Event.filter(Q(organizer=user) | Q(status=EventStatus.published))
+        .annotate(confirmed_count=confirmed_annotation)
+        .order_by("-starts_at")
+        .offset(offset)
+        .limit(limit)
     )
 
 

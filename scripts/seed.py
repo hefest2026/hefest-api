@@ -10,7 +10,7 @@ password and verification status are always in sync with this file.
 
 Usage:
     PYTHONPATH=. uv run python scripts/seed.py            # connect via HEFEST_DB_URL
-    PYTHONPATH=. uv run python scripts/seed.py --dry-run  # print what would happen, no writes
+    PYTHONPATH=. uv run python scripts/seed.py --dry-run  # dry run, no writes
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import UTC, datetime
+from typing import TypedDict
 
 from tortoise import Tortoise
 
@@ -25,7 +26,17 @@ from hefest.config import TORTOISE_ORM
 from hefest.models.user import User, UserRole
 from hefest.services.auth import hash_password
 
-SEED_ACCOUNTS: list[dict[str, str]] = [
+
+class SeedAccount(TypedDict):
+    """Typed structure for a seed account definition."""
+
+    email: str
+    password: str
+    full_name: str
+    role: UserRole
+
+
+SEED_ACCOUNTS: list[SeedAccount] = [
     {
         "email": "student@adviz.bg",
         "password": "Student!123",
@@ -53,7 +64,7 @@ async def seed(*, dry_run: bool) -> None:
 
     for account in SEED_ACCOUNTS:
         email: str = account["email"]
-        role: str = account["role"]
+        role: UserRole = account["role"]
         full_name: str = account["full_name"]
         password_hash = hash_password(account["password"])
 
@@ -67,10 +78,15 @@ async def seed(*, dry_run: bool) -> None:
         if existing:
             existing.password_hash = password_hash
             existing.full_name = full_name
-            existing.role = role  # type: ignore[assignment]
+            existing.role = role
             existing.email_verified_at = now
             await existing.save(
-                update_fields=["password_hash", "full_name", "role", "email_verified_at"]
+                update_fields=[
+                    "password_hash",
+                    "full_name",
+                    "role",
+                    "email_verified_at",
+                ]
             )
             print(f"UPDATED  {role:10s}  {email}")
         else:

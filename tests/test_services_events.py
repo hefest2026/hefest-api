@@ -94,6 +94,7 @@ class TestCreateEvent:
 class TestListEvents:
     def _paginated_qs(self, items: list[Any]) -> MagicMock:
         qs = MagicMock()
+        qs.annotate.return_value = qs
         qs.order_by.return_value = qs
         qs.offset.return_value = qs
         qs.limit = AsyncMock(return_value=items)
