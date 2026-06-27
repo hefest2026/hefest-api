@@ -48,7 +48,7 @@ async def create_event(organizer: User, data: EventCreateRequest) -> Event:
 
 
 async def list_events(user: User, *, limit: int = 100, offset: int = 0) -> list[Event]:
-    """Return events visible to the caller.
+    """Return events visible to the caller with confirmed registration counts.
 
     Students see only published events. Organizers see their own events plus
     all published events from other organizers.
@@ -59,21 +59,34 @@ async def list_events(user: User, *, limit: int = 100, offset: int = 0) -> list[
         offset: Number of rows to skip.
 
     Returns:
-        List of visible Event objects ordered by start date descending.
+        List of visible Event objects ordered by start date descending,
+        each annotated with a ``confirmed_count`` attribute.
     """
+    confirmed_annotation = Count(
+        "registrations__id",
+        _filter=Q(registrations__status="confirmed"),
+    )
     if user.role == UserRole.student:
-        return await (
-            Event.filter(status=EventStatus.published)
+        return cast(
+            list[Event],
+            await (
+                Event.filter(status=EventStatus.published)
+                .annotate(confirmed_count=confirmed_annotation)
+                .order_by("-starts_at")
+                .offset(offset)
+                .limit(limit)
+            ),
+        )
+    # Organizer: own events (any status) OR any published event
+    return cast(
+        list[Event],
+        await (
+            Event.filter(Q(organizer=user) | Q(status=EventStatus.published))
+            .annotate(confirmed_count=confirmed_annotation)
             .order_by("-starts_at")
             .offset(offset)
             .limit(limit)
-        )
-    # Organizer: own events (any status) OR any published event
-    return await (
-        Event.filter(Q(organizer=user) | Q(status=EventStatus.published))
-        .order_by("-starts_at")
-        .offset(offset)
-        .limit(limit)
+        ),
     )
 
 
@@ -118,6 +131,8 @@ async def get_event_detail(user: User, event_id: UUID) -> EventDetailResponse:
 
     _assert_visible(user, annotated_event)
 
+    organizer = await User.get(id=annotated_event.organizer_id)
+
     return EventDetailResponse(
         id=annotated_event.id,
         organizer_id=annotated_event.organizer_id,
@@ -132,6 +147,7 @@ async def get_event_detail(user: User, event_id: UUID) -> EventDetailResponse:
         updated_at=annotated_event.updated_at,
         confirmed_count=annotated_event.confirmed_count,
         waitlist_count=annotated_event.waitlist_count,
+        organizer_name=organizer.full_name,
     )
 
 

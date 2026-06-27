@@ -57,6 +57,7 @@ class EventResponse(BaseModel):
     ends_at: datetime | None
     location: str
     capacity: int
+    confirmed_count: int = 0
     status: EventStatus
     created_at: datetime
     updated_at: datetime
@@ -67,5 +68,5 @@ class EventResponse(BaseModel):
 class EventDetailResponse(EventResponse):
     """Response schema for GET /events/{id} — includes live seat counts."""
 
-    confirmed_count: int
     waitlist_count: int
+    organizer_name: str

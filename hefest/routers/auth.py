@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, Header, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
 
 from hefest.config import settings
 from hefest.models.user import User, UserRole
+from hefest.routers.deps import get_current_user
 from hefest.schemas.auth import (
     LoginRequest,
     RegisterRequest,
     TokenResponse,
+    UserMeResponse,
     VerifyEmailRequest,
 )
 from hefest.services import auth as auth_svc
@@ -139,6 +141,12 @@ async def logout(
         key=settings.refresh_cookie_name,
         path="/auth",
     )
+
+
+@router.get("/users/me", response_model=UserMeResponse)
+async def get_me(user: User = Depends(get_current_user)) -> UserMeResponse:
+    """Return the profile of the currently authenticated user."""
+    return UserMeResponse.model_validate(user)
 
 
 @router.post("/auth/logout-all", status_code=status.HTTP_204_NO_CONTENT)

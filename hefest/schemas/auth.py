@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import UUID
 
 from pydantic import BaseModel, EmailStr
 from pydantic.functional_validators import AfterValidator
+
+from hefest.models.user import UserRole
 
 
 def _password_validator(v: str) -> str:
@@ -99,3 +102,21 @@ class ProvidersResponse(BaseModel):
 
     password: dict[str, bool]
     providers: list[OAuthProviderInfo]
+
+
+class UserMeResponse(BaseModel):
+    """Response schema for the current authenticated user.
+
+    Attributes:
+        id: User UUID
+        email: User email address
+        full_name: User display name
+        role: User role (student or organizer)
+    """
+
+    id: UUID
+    email: str
+    full_name: str
+    role: UserRole
+
+    model_config = {"from_attributes": True}
