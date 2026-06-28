@@ -35,7 +35,7 @@ async def _null_tx() -> Any:
 
 def _mock_tx() -> MagicMock:
     m = MagicMock()
-    m.return_value = _null_tx()
+    m.side_effect = lambda: _null_tx()
     return m
 
 
@@ -313,8 +313,9 @@ class TestCancelEvent:
     async def test_fan_out_enqueues_confirmed_and_waitlisted(self) -> None:
         """Cancelling an event enqueues one EventCancelled job per affected reg.
 
-        Confirmed and waitlisted registrations are included; cancelled ones
-        are excluded (the service filters by status__in=[confirmed, waitlisted]).
+        Confirmed and waitlisted registrations are included. Exclusion of
+        cancelled registrations is verified via the DB-filter assertion in
+        test_fan_out_excludes_cancelled_registrations.
         """
         organizer = _user(UserRole.organizer)
         event_id = uuid.uuid4()
@@ -346,22 +347,26 @@ class TestCancelEvent:
         jobs: list[Any] = bulk_create.call_args[0][0]
         assert len(jobs) == 3
 
-        reg_ids = {r.id for r in regs}
-        student_ids = {r.student_id for r in regs}
+        # Build independent source sets from the regs this test created so that
+        # a shared bug (e.g. using event_id instead of reg.id) cannot mask itself.
+        source_reg_ids = {str(r.id) for r in regs}
+        source_student_ids = {str(r.student_id) for r in regs}
         for job in jobs:
             assert job.event_type == "EventCancelled"
-            expected_key = f"{job.payload['registration_id']}:EventCancelled"
-            assert job.idempotency_key == expected_key
-            assert uuid.UUID(job.payload["registration_id"]) in reg_ids
-            assert uuid.UUID(job.payload["student_id"]) in student_ids
-            assert str(event_id) == job.payload["event_id"]
+            rid = job.payload["registration_id"]
+            assert rid in source_reg_ids
+            assert job.idempotency_key == f"{rid}:EventCancelled"
+            assert job.payload["student_id"] in source_student_ids
+            assert job.payload["event_id"] == str(event_id)
             assert "occurred_at" in job.payload
             assert "user_id" not in job.payload
 
     async def test_fan_out_excludes_cancelled_registrations(self) -> None:
         """The service queries only confirmed+waitlisted; cancelled regs are out.
 
-        This test verifies the filter call uses the correct status__in argument.
+        Verifies the DB filter uses the correct status__in argument. Job field
+        content (idempotency_key, payload shape) is verified in
+        test_fan_out_enqueues_confirmed_and_waitlisted.
         """
         organizer = _user(UserRole.organizer)
         event_id = uuid.uuid4()
