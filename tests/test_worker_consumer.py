@@ -20,7 +20,7 @@ import asyncio
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -28,6 +28,7 @@ import pytest
 from hefest.worker import consumer
 from hefest.worker.claim import ClaimedJob
 from hefest.worker.errors import PermanentError, RecipientNotFound
+from hefest.worker.heartbeat import Heartbeat
 from hefest.worker.mailer import PermanentSendError, TransientSendError
 from hefest.worker.templates import EmailContent
 
@@ -116,8 +117,10 @@ async def test_success_marks_completed(
     mailer.send.assert_awaited_once()
     finalizers["mark_completed"].assert_awaited_once()
     # Fenced finalizer called as (conn, job_id, worker_id) with no extra kwargs.
-    assert finalizers["mark_completed"].await_args.args[1:] == (job.id, WORKER_ID)
-    assert finalizers["mark_completed"].await_args.kwargs == {}
+    completed_call = finalizers["mark_completed"].await_args
+    assert completed_call is not None
+    assert completed_call.args[1:] == (job.id, WORKER_ID)
+    assert completed_call.kwargs == {}
     finalizers["mark_retry"].assert_not_awaited()
     finalizers["mark_failed"].assert_not_awaited()
 
@@ -137,7 +140,9 @@ async def test_recipient_not_found_marks_failed(
 
     mailer.send.assert_not_awaited()
     finalizers["mark_failed"].assert_awaited_once()
-    assert finalizers["mark_failed"].await_args.kwargs["last_error"] == "gone"
+    failed_call = finalizers["mark_failed"].await_args
+    assert failed_call is not None
+    assert failed_call.kwargs["last_error"] == "gone"
     finalizers["mark_completed"].assert_not_awaited()
     finalizers["mark_retry"].assert_not_awaited()
 
@@ -186,8 +191,10 @@ async def test_transient_under_cap_marks_retry_with_backoff(
 
     finalizers["mark_retry"].assert_awaited_once()
     # attempts=1, base=30 -> 30 (spec §5 exponential backoff base 4).
-    assert finalizers["mark_retry"].await_args.kwargs["delay_seconds"] == 30
-    assert finalizers["mark_retry"].await_args.kwargs["last_error"] == "timeout"
+    retry_call = finalizers["mark_retry"].await_args
+    assert retry_call is not None
+    assert retry_call.kwargs["delay_seconds"] == 30
+    assert retry_call.kwargs["last_error"] == "timeout"
     finalizers["mark_failed"].assert_not_awaited()
 
 
@@ -240,10 +247,15 @@ async def test_unexpected_error_propagates(
 # --------------------------------------------------------------------------- #
 # _drain orchestration
 # --------------------------------------------------------------------------- #
-def _heartbeat_stub() -> Any:
-    hb = type("HB", (), {})()
-    hb.lease_lost = asyncio.Event()
-    return hb
+class _HeartbeatStub(Heartbeat):
+    """Minimal Heartbeat stand-in for unit tests — no background task, no DB."""
+
+    def __init__(self) -> None:
+        self.lease_lost: asyncio.Event = asyncio.Event()
+
+
+def _heartbeat_stub() -> _HeartbeatStub:
+    return _HeartbeatStub()
 
 
 async def test_drain_reaper_runs_once_per_wake(
@@ -284,7 +296,7 @@ async def test_drain_loops_on_full_batch_stops_on_short(
     await consumer._drain(WORKER_ID, AsyncMock(), _heartbeat_stub(), asyncio.Event())
 
     assert claim.await_count == 2
-    assert consumer._process_one.await_count == 3
+    assert cast(AsyncMock, consumer._process_one).await_count == 3
     # asyncio.sleep(0) yields between iterations (one per processed batch).
     assert sleeps == [0, 0]
 

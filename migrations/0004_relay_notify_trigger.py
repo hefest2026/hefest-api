@@ -15,7 +15,7 @@ class Migration(migrations.Migration):
     Statement-level (not row-level) keeps a single bulk insert — e.g. the
     EventCancelled fan-out — to one wake signal instead of one per row.
 
-    The channel name MUST match ``settings.relay_notify_channel`` ("hefest_jobs").
+    The channel name MUST match ``settings.worker_notify_channel`` ("hefest_jobs").
     """
 
     dependencies = [("models", "0003_auto_20260619_1539")]

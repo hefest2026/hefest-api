@@ -79,7 +79,7 @@ def _normalize_payload(payload: Any) -> dict[str, Any]:
 
     asyncpg returns jsonb as raw text on raw queries (no ORM decode layer), so a
     text/bytes payload is parsed with orjson; an already-decoded dict passes
-    through unchanged (matching ``relay.claim_pending_jobs``).
+    through unchanged.
 
     Args:
         payload: The raw ``payload`` value from a claimed row.
