@@ -41,23 +41,56 @@ class Settings(BaseSettings):
     microsoft_tenant: str = ""
     microsoft_redirect_uri: str = ""
 
-    # relay — outbox-to-Redis bridge.
+    # notification delivery worker — Postgres-outbox driven email sender.
     #
-    # The relay is push-driven via PostgreSQL LISTEN/NOTIFY (channel below): an
+    # The worker is push-driven via PostgreSQL LISTEN/NOTIFY (channel below): an
     # AFTER INSERT trigger on notification_jobs fires NOTIFY at COMMIT, waking the
-    # relay in ~milliseconds instead of waiting for a poll tick. NOTIFY is
-    # fire-and-forget (at-most-once) — a signal emitted while the relay is
+    # worker in ~milliseconds instead of waiting for a poll tick. NOTIFY is
+    # fire-and-forget (at-most-once) — a signal emitted while the worker is
     # disconnected is lost — so a long-interval fallback poll guarantees eventual
     # drain and catch-up after downtime. The outbox row itself is the durable
-    # source of truth; NOTIFY only collapses latency. See worker/relay.py.
-    relay_notify_channel: str = "hefest_jobs"
-    relay_fallback_poll_interval: float = 5.0
+    # source of truth; NOTIFY only collapses latency. See worker/consumer.py.
+    worker_notify_channel: str = "hefest_jobs"
+    worker_fallback_poll_interval: float = 5.0
     """Safety-net poll cadence (seconds) for jobs whose NOTIFY was missed."""
-    relay_batch_size: int = 100
-    """Max pending rows claimed per drain pass (FOR UPDATE SKIP LOCKED)."""
-    relay_stream: str = "hefest:notifications"
-    relay_stream_maxlen: int = 10_000
-    """Approximate (~) cap on Redis stream length via XADD MAXLEN."""
+    worker_claim_batch_size: int = 50
+    """Max pending rows claimed per pass (FOR UPDATE SKIP LOCKED).
+
+    Worst case ceil(50/10)*30s = 150s to fully drain one batch at
+    worker_send_concurrency=10 and worker_backoff_base_seconds=30, which stays
+    well under worker_reaper_idle_seconds (300) so claimed-but-stalled rows are
+    still reaped correctly.
+    """
+    worker_reaper_idle_seconds: int = 300
+    """Lease age after which a claimed-but-unfinished job is reclaimed."""
+    worker_heartbeat_interval: int = 90
+    """Lease renewal cadence; must stay <= 1/3 of worker_reaper_idle_seconds
+    (300) so a live worker renews its lease at least twice before the reaper
+    would otherwise consider it dead."""
+    worker_max_attempts: int = 3
+    """Max delivery attempts before a job is permanently failed."""
+    worker_backoff_base_seconds: int = 30
+    """Base for the retry backoff applied between delivery attempts."""
+    worker_send_concurrency: int = 10
+    """Max concurrent in-flight SMTP sends."""
+    worker_db_pool_size: int = 13
+    """asyncpg pool size for the worker's own Tortoise connection (see
+    build_worker_tortoise_orm). Must be >= worker_send_concurrency (10) plus
+    headroom for the claim, heartbeat, and reaper queries running
+    concurrently with in-flight sends."""
+
+    # SMTP (mailpit in dev compose, Resend in prod)
+    smtp_host: str = "localhost"
+    smtp_port: int = 1025
+    smtp_from: str = "noreply@hefest.local"
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = False
+    smtp_timeout: int = 30
+    """Per-send SMTP timeout (seconds); must stay well under
+    worker_heartbeat_interval (90), which itself is well under
+    worker_reaper_idle_seconds (300), so a hung send is never mistaken for a
+    healthy lease."""
 
     # trusted reverse proxies (ProxyHeadersMiddleware uses this list)
     # set to the nginx container IP or CIDR in production
@@ -113,3 +146,37 @@ TORTOISE_ORM: dict = {
         },
     },
 }
+
+
+def build_worker_tortoise_orm() -> dict:
+    """Build the notification worker's own Tortoise config.
+
+    Identical to ``TORTOISE_ORM`` except the connection's asyncpg pool
+    ``maxsize`` is sized for the worker's concurrent claim/send/heartbeat/
+    reaper load (``settings.worker_db_pool_size``) instead of the shared
+    web-request pool default.
+
+    The asyncpg client (tortoise-orm 1.1.7) reads the pool size via
+    ``self.extra.pop("maxsize", 5)`` in ``BasePostgresClient.__init__``,
+    where ``extra`` is populated from any DSN query-string parameter not
+    otherwise consumed — so appending ``?maxsize=N`` to the connection URL
+    sets the asyncpg pool's ``max_size`` correctly (verified against
+    ``tortoise.backends.base_postgres.client`` source and a live connection).
+    A separator of ``&`` vs ``?`` is chosen based on whether ``db_url``
+    already has a query string.
+    """
+    separator = "&" if "?" in settings.db_url else "?"
+    pool_size = settings.worker_db_pool_size
+    worker_db_url = f"{settings.db_url}{separator}maxsize={pool_size}"
+    return {
+        "connections": {
+            "default": worker_db_url,
+        },
+        "apps": {
+            "models": {
+                "models": ["hefest.models"],
+                "default_connection": "default",
+                "migrations": "migrations",
+            },
+        },
+    }
