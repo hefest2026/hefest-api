@@ -82,7 +82,7 @@ class FakeSMTP:
             ``quit()``; raised exceptions propagate to the caller.
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, **kwargs: object) -> None:
         self.is_connected: bool = False
         self.connect_count: int = 0
         self.login_count: int = 0

@@ -78,10 +78,20 @@ def _classify_smtp_error(exc: Exception) -> TransientSendError | PermanentSendEr
     # SMTPRecipientsRefused does NOT inherit SMTPResponseException; its code
     # lives inside the nested SMTPRecipientRefused objects.
     if isinstance(exc, SMTPRecipientsRefused):
+        # The worker sends exactly one recipient per call, so
+        # ``exc.recipients`` is always a single-element list.  ``max(codes)``
+        # is the defensive choice: if any recipient is permanently (5xx)
+        # rejected the send is treated as permanent so the job is not retried
+        # indefinitely.  A mixed 4xx/5xx result cannot occur in this worker
+        # but is handled correctly by this heuristic.
         codes = [r.code for r in exc.recipients]
         if codes and max(codes) >= 500:
-            return PermanentSendError(f"SMTP recipients refused (5xx): {exc}")
-        return TransientSendError(f"SMTP recipients refused (4xx/transient): {exc}")
+            return PermanentSendError(
+                f"SMTP recipients refused (permanent, codes={codes}): {exc}"
+            )
+        return TransientSendError(
+            f"SMTP recipients refused (transient, codes={codes}): {exc}"
+        )
 
     # SMTPResponseException (and all subclasses: SMTPDataError,
     # SMTPSenderRefused, SMTPRecipientRefused, SMTPHeloError,
@@ -192,5 +202,5 @@ class Mailer:
         """
         while not self._pool.empty():
             client = self._pool.get_nowait()
-            with suppress(Exception):
+            with suppress(SMTPException, OSError):
                 await client.quit()
