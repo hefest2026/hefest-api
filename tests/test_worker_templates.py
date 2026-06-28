@@ -63,14 +63,16 @@ def test_registration_waitlisted_subject_body_and_position() -> None:
     assert "Python Workshop" in result.subject
     assert "Alice Smith" in result.body
     assert "Python Workshop" in result.body
-    assert "3" in result.body
+    assert "Your current position: 3." in result.body
+    assert _STARTS in result.body
+    assert "Room 101" in result.body
 
 
 def test_registration_waitlisted_without_position() -> None:
     result = _render("RegistrationWaitlisted", {})
 
     assert "Alice Smith" in result.body
-    assert "position" not in result.body
+    assert "Your current position" not in result.body
 
 
 def test_waitlist_promoted_subject_and_body() -> None:

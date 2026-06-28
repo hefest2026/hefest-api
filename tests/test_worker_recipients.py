@@ -48,17 +48,10 @@ async def test_load_returns_recipient_when_both_exist() -> None:
 
 
 async def test_load_raises_when_user_missing() -> None:
-    with (
-        patch(
-            "hefest.worker.recipients.User.get_or_none",
-            new_callable=AsyncMock,
-            return_value=None,
-        ),
-        patch(
-            "hefest.worker.recipients.Event.get_or_none",
-            new_callable=AsyncMock,
-            return_value=_FAKE_EVENT,
-        ),
+    with patch(
+        "hefest.worker.recipients.User.get_or_none",
+        new_callable=AsyncMock,
+        return_value=None,
     ):
         with pytest.raises(RecipientNotFound, match=STUDENT_ID):
             await load(_PAYLOAD)
