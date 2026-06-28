@@ -345,3 +345,144 @@ async def test_drain_respects_concurrency_cap(
     await consumer._drain(WORKER_ID, AsyncMock(), _heartbeat_stub(), asyncio.Event())
 
     assert peak <= 3
+
+
+# --------------------------------------------------------------------------- #
+# _listen — reconnect/backoff loop and catch-up wake
+# --------------------------------------------------------------------------- #
+
+
+async def test_listen_registers_listener_and_sets_wake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On first connect, listener is registered, wake is set immediately (catch-up drain),
+    and the connection is closed when the task is cancelled."""
+    wake = asyncio.Event()
+    mock_conn = AsyncMock()
+
+    async def fake_sleep(_delay: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(consumer.asyncpg, "connect", AsyncMock(return_value=mock_conn))
+    monkeypatch.setattr(consumer.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(consumer.settings, "db_url", "asyncpg://u:p@h/db")
+    monkeypatch.setattr(consumer.settings, "worker_notify_channel", "outbox")
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer._listen(wake)
+
+    assert wake.is_set()
+    mock_conn.add_listener.assert_awaited_once()
+    assert mock_conn.add_listener.await_args.args[0] == "outbox"
+    mock_conn.close.assert_awaited_once()
+
+
+async def test_listen_dsn_scheme_rewritten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """asyncpg:// in db_url is replaced with postgresql:// before connecting."""
+    wake = asyncio.Event()
+    mock_conn = AsyncMock()
+    connect = AsyncMock(return_value=mock_conn)
+
+    async def fake_sleep(_delay: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(consumer.asyncpg, "connect", connect)
+    monkeypatch.setattr(consumer.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(consumer.settings, "db_url", "asyncpg://user:pass@host:5432/db")
+    monkeypatch.setattr(consumer.settings, "worker_notify_channel", "outbox")
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer._listen(wake)
+
+    connect.assert_awaited_once_with("postgresql://user:pass@host:5432/db")
+
+
+async def test_listen_connect_failure_sleeps_with_initial_backoff_then_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed connect sleeps for _RECONNECT_BACKOFF_INITIAL before retrying; on
+    success the backoff is reset and wake is set."""
+    wake = asyncio.Event()
+    mock_conn = AsyncMock()
+    connect = AsyncMock(side_effect=[OSError("refused"), mock_conn])
+
+    slept: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        slept.append(delay)
+        if len(slept) >= 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(consumer.asyncpg, "connect", connect)
+    monkeypatch.setattr(consumer.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(consumer.settings, "db_url", "asyncpg://u:p@h/db")
+    monkeypatch.setattr(consumer.settings, "worker_notify_channel", "outbox")
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer._listen(wake)
+
+    assert connect.await_count == 2
+    assert slept[0] == consumer._RECONNECT_BACKOFF_INITIAL
+    assert wake.is_set()
+
+
+async def test_listen_backoff_doubles_and_caps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backoff doubles on each consecutive connect failure up to _RECONNECT_BACKOFF_MAX."""
+    wake = asyncio.Event()
+    slept: list[float] = []
+    # Six failures → backoff sequence 1, 2, 4, 8, 16, 30 (capped)
+    failures = [OSError("down")] * 6
+
+    async def fake_connect(_dsn: str) -> object:
+        if failures:
+            raise failures.pop(0)
+        raise asyncio.CancelledError
+
+    async def fake_sleep(delay: float) -> None:
+        slept.append(delay)
+
+    monkeypatch.setattr(consumer.asyncpg, "connect", fake_connect)
+    monkeypatch.setattr(consumer.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(consumer.settings, "db_url", "asyncpg://u:p@h/db")
+    monkeypatch.setattr(consumer.settings, "worker_notify_channel", "outbox")
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer._listen(wake)
+
+    assert slept == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0]
+
+
+async def test_listen_dropped_connection_closes_and_reconnects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A keep-alive ping failure closes the connection and loops back to connect."""
+    wake = asyncio.Event()
+    mock_conn = AsyncMock()
+    mock_conn.execute.side_effect = OSError("connection reset")
+
+    connect_calls = 0
+
+    async def fake_connect(_dsn: str) -> object:
+        nonlocal connect_calls
+        connect_calls += 1
+        if connect_calls >= 2:
+            raise asyncio.CancelledError
+        return mock_conn
+
+    async def fake_sleep(_delay: float) -> None:
+        pass
+
+    monkeypatch.setattr(consumer.asyncpg, "connect", fake_connect)
+    monkeypatch.setattr(consumer.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(consumer.settings, "db_url", "asyncpg://u:p@h/db")
+    monkeypatch.setattr(consumer.settings, "worker_notify_channel", "outbox")
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer._listen(wake)
+
+    assert connect_calls == 2
+    mock_conn.close.assert_awaited_once()
