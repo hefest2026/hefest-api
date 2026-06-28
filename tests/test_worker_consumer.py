@@ -355,8 +355,8 @@ async def test_drain_respects_concurrency_cap(
 async def test_listen_registers_listener_and_sets_wake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On first connect, listener is registered, wake is set immediately (catch-up drain),
-    and the connection is closed when the task is cancelled."""
+    """On first connect, listener is registered, wake is set immediately (catch-up
+    drain), and the connection is closed when the task is cancelled."""
     wake = asyncio.Event()
     mock_conn = AsyncMock()
 
@@ -431,7 +431,8 @@ async def test_listen_connect_failure_sleeps_with_initial_backoff_then_retries(
 async def test_listen_backoff_doubles_and_caps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Backoff doubles on each consecutive connect failure up to _RECONNECT_BACKOFF_MAX."""
+    """Backoff doubles on each consecutive connect failure up to
+    _RECONNECT_BACKOFF_MAX."""
     wake = asyncio.Event()
     slept: list[float] = []
     # Six failures → backoff sequence 1, 2, 4, 8, 16, 30 (capped)
