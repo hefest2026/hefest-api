@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     # set to the nginx container IP or CIDR in production
     trusted_proxies: list[str] = ["127.0.0.1", "::1"]
 
+    # event business rules
+    event_location_lock_hours: int = 2
+    """Hours before event start within which the location can no longer be changed."""
+
     # rate limiting
     rate_limit_login_count: int = 10
     rate_limit_login_window_seconds: int = 60
