@@ -5,7 +5,6 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from tortoise import fields
-from tortoise.indexes import PartialIndex
 from tortoise.models import Model
 
 if TYPE_CHECKING:
@@ -14,14 +13,20 @@ if TYPE_CHECKING:
 
 class JobStatus(StrEnum):
     pending = "pending"
-    published = "published"
+    processing = "processing"
+    completed = "completed"
+    failed = "failed"
 
 
 class NotificationJob(Model):
-    """Transactional outbox row — bridges DB writes to Redis Streams.
+    """Postgres-outbox row — single source of truth for enqueue AND delivery.
 
     Written by the API in the same transaction as the triggering registration
-    change. The relay polls ``pending`` rows and publishes them to Redis.
+    change, then consumed directly by the delivery worker. There is no Redis and
+    no separate delivery log: the worker claims ``pending`` rows, leases them via
+    ``locked_by``/``heartbeat_at`` while ``processing``, and finalizes each row
+    to ``completed`` or ``failed`` in place, tracking ``attempts``,
+    ``next_attempt_at`` (retry backoff) and ``last_error`` on the row itself.
     """
 
     id = fields.UUIDField(primary_key=True)
@@ -35,15 +40,13 @@ class NotificationJob(Model):
     payload = fields.JSONField()
     status = fields.CharEnumField(JobStatus, max_length=16, default=JobStatus.pending)
     idempotency_key = fields.CharField(max_length=512, unique=True)
+    attempts = fields.IntField(default=0)
+    locked_by = fields.TextField(null=True)
+    heartbeat_at = fields.DatetimeField(null=True)
+    next_attempt_at = fields.DatetimeField(auto_now_add=True)
+    last_error = fields.TextField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
 
     class Meta:
         table = "notification_jobs"
-        indexes = [
-            PartialIndex(
-                fields=["id"],
-                name="idx_jobs_pending",
-                condition={"status": "pending"},
-            ),
-        ]

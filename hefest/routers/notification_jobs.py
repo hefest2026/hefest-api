@@ -7,7 +7,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from hefest.models.notification_job import NotificationJob
-from hefest.models.notification_log import NotificationLog
 from hefest.models.user import User, UserRole
 from hefest.routers.deps import require_role
 from hefest.schemas.notification_job import (
@@ -44,7 +43,7 @@ async def get_notification_job(
     job_id: UUID,
     organizer: User = Depends(_require_organizer),
 ) -> NotificationJobDetailResponse:
-    """Get a single outbox job with its delivery status from the notification log."""
+    """Get a single outbox job with its delivery status and diagnostic."""
     job = await NotificationJob.filter(
         id=job_id, event__organizer=organizer
     ).get_or_none()
@@ -53,10 +52,6 @@ async def get_notification_job(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="notification job not found",
         )
-
-    log = await NotificationLog.filter(
-        idempotency_key=job.idempotency_key
-    ).get_or_none()
 
     return NotificationJobDetailResponse(
         id=job.id,
@@ -67,5 +62,5 @@ async def get_notification_job(
         idempotency_key=job.idempotency_key,
         created_at=job.created_at,
         updated_at=job.updated_at,
-        delivery_status=log.status if log is not None else None,
+        last_error=job.last_error,
     )

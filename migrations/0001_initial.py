@@ -1,4 +1,5 @@
 import functools
+from enum import StrEnum
 from json import dumps, loads
 from uuid import uuid4
 
@@ -9,9 +10,17 @@ from tortoise.migrations import operations as ops
 
 from hefest.models.event import EventStatus
 from hefest.models.notification_job import JobStatus
-from hefest.models.notification_log import DeliveryStatus
 from hefest.models.registration import RegistrationStatus
 from hefest.models.user import UserRole
+
+
+# Historical enum frozen into this migration. The ``notification_log`` table and
+# its ``DeliveryStatus`` enum were removed in migration 0006; this local copy
+# keeps the initial migration self-contained so its SQL still renders.
+class DeliveryStatus(StrEnum):
+    processing = "processing"
+    completed = "completed"
+    failed = "failed"
 
 
 class Migration(migrations.Migration):

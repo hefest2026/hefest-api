@@ -9,9 +9,12 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from tortoise.expressions import Q
 from tortoise.functions import Count
+from tortoise.transactions import in_transaction
 
 from hefest.config import settings
 from hefest.models.event import Event, EventStatus
+from hefest.models.notification_job import NotificationJob
+from hefest.models.registration import Registration, RegistrationStatus
 from hefest.models.user import User, UserRole
 from hefest.schemas.event import (
     EventCreateRequest,
@@ -219,11 +222,20 @@ async def publish_event(user: User, event_id: UUID) -> Event:
 
 
 async def cancel_event(user: User, event_id: UUID) -> Event:
-    """Cancel an event owned by the caller.
+    """Cancel an event owned by the caller, fanning out EventCancelled jobs.
 
-    Both draft and published events can be cancelled. Already cancelled events
-    are returned as-is (idempotent). Past events (starts_at in the past)
-    cannot be cancelled.
+    Both draft and published events can be cancelled. Already-cancelled events
+    are returned as-is without enqueueing any new jobs (idempotent). Past
+    events (starts_at <= now) cannot be cancelled.
+
+    The cancel mutation and the notification fan-out run in a single
+    transaction: the event row is locked first (select_for_update), then one
+    NotificationJob is bulk-created per confirmed or waitlisted registration.
+    The statement-level AFTER INSERT trigger fires exactly one pg_notify for
+    the whole bulk insert, so each row is handled as a normal one-email job.
+
+    Note: N rows in one bulk_create is trivial at school-event capacity.
+    Chunk bulk_create if capacity ever grows.
 
     Args:
         user: The authenticated organizer.
@@ -236,27 +248,57 @@ async def cancel_event(user: User, event_id: UUID) -> Event:
         HTTPException 404: If the event is not found or not owned by the caller.
         HTTPException 409: If the event has already started.
     """
-    event = await Event.get_or_none(id=event_id)
-    if event is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
+    async with in_transaction() as conn:
+        event = (
+            await Event.filter(id=event_id)
+            .using_db(conn)
+            .select_for_update()
+            .get_or_none()
         )
-    _assert_owner(user, event)
+        if event is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
+            )
+        _assert_owner(user, event)
 
-    if event.status == EventStatus.cancelled:
-        return event
+        if event.status == EventStatus.cancelled:
+            return event
 
-    starts_at = event.starts_at
-    if starts_at.tzinfo is None:
-        starts_at = starts_at.replace(tzinfo=UTC)
-    if starts_at <= datetime.now(UTC):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="cannot cancel an event that has already started",
-        )
+        starts_at = event.starts_at
+        if starts_at.tzinfo is None:
+            starts_at = starts_at.replace(tzinfo=UTC)
+        if starts_at <= datetime.now(UTC):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="cannot cancel an event that has already started",
+            )
 
-    event.status = EventStatus.cancelled
-    await event.save(update_fields=["status", "updated_at"])
+        event.status = EventStatus.cancelled
+        await event.save(update_fields=["status", "updated_at"], using_db=conn)
+
+        regs = await Registration.filter(
+            event_id=event_id,
+            status__in=[RegistrationStatus.confirmed, RegistrationStatus.waitlisted],
+        ).using_db(conn)
+
+        occurred_at = datetime.now(UTC).isoformat()
+        jobs = [
+            NotificationJob(
+                event_id=event_id,
+                event_type="EventCancelled",
+                payload={
+                    "event_id": str(event_id),
+                    "student_id": str(reg.student_id),
+                    "registration_id": str(reg.id),
+                    "occurred_at": occurred_at,
+                },
+                idempotency_key=f"{reg.id}:EventCancelled",
+            )
+            for reg in regs
+        ]
+        if jobs:
+            await NotificationJob.bulk_create(jobs, using_db=conn)
+
     return event
 
 
