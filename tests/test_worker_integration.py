@@ -45,6 +45,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import orjson
+import pytest
 from tortoise.transactions import in_transaction
 
 from hefest.config import settings
@@ -67,6 +68,7 @@ from hefest.worker.templates import EmailContent
 # The ephemeral Postgres + Tortoise lifecycle is owned by the session-scoped
 # ``pg_container`` / ``db`` fixtures in conftest.py. Tests opt in via ``db``;
 # Docker-unavailable runs skip there with a clear reason.
+pytestmark = pytest.mark.integration
 
 
 # ---------------------------------------------------------------------------

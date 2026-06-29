@@ -30,12 +30,15 @@ class NotificationJob(Model):
     """
 
     id = fields.UUIDField(primary_key=True)
-    event: fields.ForeignKeyRelation[Event] = fields.ForeignKeyField(
+    # Nullable: event-scoped jobs (registration changes) reference their Event;
+    # account-scoped jobs (e.g. ``EmailVerify``) have no event and store NULL.
+    event: fields.ForeignKeyNullableRelation[Event] = fields.ForeignKeyField(
         "models.Event",
         related_name="notification_jobs",
         on_delete=fields.OnDelete.CASCADE,
+        null=True,
     )
-    event_id: uuid.UUID
+    event_id: uuid.UUID | None
     event_type = fields.TextField()
     payload = fields.JSONField()
     status = fields.CharEnumField(JobStatus, max_length=16, default=JobStatus.pending)

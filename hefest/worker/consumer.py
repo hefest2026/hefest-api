@@ -46,6 +46,7 @@ from tortoise.exceptions import DBConnectionError, OperationalError
 from tortoise.transactions import in_transaction
 
 from hefest.config import settings
+from hefest.services import auth as auth_svc
 from hefest.worker import recipients, templates
 from hefest.worker.claim import (
     backoff_delay,
@@ -205,8 +206,19 @@ async def _process_one(job: ClaimedJob, worker_id: str, mailer: Mailer) -> None:
     """
     try:
         recipient = await recipients.load(job.payload)
+        # Account-scoped verification emails carry a freshly-minted stateless
+        # token built from the re-fetched user — never from payload PII.
+        verify_link = (
+            auth_svc.build_email_verify_link(recipient.user)
+            if job.event_type == "EmailVerify"
+            else None
+        )
         content = templates.render(
-            job.event_type, recipient.user, recipient.event, job.payload
+            job.event_type,
+            recipient.user,
+            recipient.event,
+            job.payload,
+            verify_link=verify_link,
         )
         await mailer.send(content, recipient.user.email)
     except PermanentError as exc:

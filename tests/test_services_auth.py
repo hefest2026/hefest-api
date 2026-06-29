@@ -3,10 +3,12 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import jwt
+import pytest
 
 from hefest.config import settings
 from hefest.services.auth import (
     _hash_token,
+    build_email_verify_link,
     create_access_token,
     create_email_verify_token,
     hash_password,
@@ -67,6 +69,36 @@ class TestEmailVerifyToken:
         assert payload["sub"] == str(user.id)
         assert payload["aud"] == "hefest-verify"
         assert payload["type"] == "email_verify"
+
+    def test_build_email_verify_link_embeds_valid_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The link is base URL + token query param carrying a decodable JWT."""
+        monkeypatch.setattr(settings, "email_verify_url", "https://app/verify-email")
+        user = MagicMock()
+        user.id = "00000000-0000-0000-0000-000000000005"
+
+        link = build_email_verify_link(user)
+
+        assert link.startswith("https://app/verify-email?token=")
+        token = link.split("token=", 1)[1]
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=[settings.jwt_algorithm],
+            audience="hefest-verify",
+        )
+        assert payload["sub"] == str(user.id)
+
+    def test_build_email_verify_link_appends_with_ampersand(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A base URL that already has a query string uses & as the separator."""
+        monkeypatch.setattr(settings, "email_verify_url", "https://app/v?lang=bg")
+        user = MagicMock()
+        user.id = "00000000-0000-0000-0000-000000000006"
+
+        assert "?lang=bg&token=" in build_email_verify_link(user)
 
 
 class TestUserIdFromAccessToken:

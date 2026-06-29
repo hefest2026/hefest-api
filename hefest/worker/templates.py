@@ -47,25 +47,49 @@ class EmailContent:
 def render(
     event_type: str,
     user: User,
-    event: Event,
+    event: Event | None,
     payload: dict[str, Any],
+    verify_link: str | None = None,
 ) -> EmailContent:
     """Render the email for one notification job.  Pure (no I/O).
 
     Args:
         event_type: The notification event type string from the job.
         user: The freshly-fetched User (recipient).
-        event: The freshly-fetched Event.
+        event: The freshly-fetched Event, or ``None`` for account-scoped jobs
+            (``EmailVerify``) that have no event.
         payload: The decoded job payload (used for type-specific extras such
             as ``waitlist_position``).
+        verify_link: The pre-built verification URL, required for and only used
+            by the ``EmailVerify`` type.
 
     Returns:
         EmailContent with subject and plain-text body.
 
     Raises:
-        PermanentError: If ``event_type`` is not one of the five known types.
+        PermanentError: If ``event_type`` is unknown, if an event-scoped type is
+            given no ``event``, or if ``EmailVerify`` is given no ``verify_link``.
             The job must be parked as ``failed``, not retried.
     """
+    if event_type == "EmailVerify":
+        if verify_link is None:
+            raise PermanentError("EmailVerify job has no verify_link")
+        return EmailContent(
+            subject="Verify your Hefest email address",
+            body=(
+                f"Hi {user.full_name},\n\n"
+                "Welcome to Hefest. Please confirm your email address by "
+                "opening the link below:\n\n"
+                f"{verify_link}\n\n"
+                "If you did not create this account, you can ignore this email."
+            ),
+        )
+
+    # Every remaining type is event-scoped and dereferences the event.
+    if event is None:
+        raise PermanentError(
+            f"event-scoped event_type {event_type!r} has no event to render"
+        )
     starts = _fmt_dt(event.starts_at)
 
     match event_type:
