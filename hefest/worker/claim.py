@@ -144,8 +144,10 @@ async def claim_batch(
     ]
 
 
-async def reap_stale(conn: BaseDBAsyncClient, reaper_idle_seconds: int) -> int:
-    """Reclaim leases whose heartbeat has gone stale (spec §3).
+async def reap_stale(
+    conn: BaseDBAsyncClient, reaper_idle_seconds: int, batch_size: int
+) -> int:
+    """Reclaim up to ``batch_size`` leases whose heartbeat has gone stale (§3).
 
     Flips ``processing`` rows whose ``heartbeat_at`` is older than
     ``reaper_idle_seconds`` back to ``pending`` and clears the fence so they can
@@ -153,20 +155,26 @@ async def reap_stale(conn: BaseDBAsyncClient, reaper_idle_seconds: int) -> int:
     claim already consumed an attempt) or ``next_attempt_at`` (the row is due
     again immediately).
 
-    Candidate rows are taken with ``FOR UPDATE SKIP LOCKED`` (same idiom as
-    :func:`claim_batch`), so when two workers reap concurrently the second skips
-    any row the first is already updating instead of blocking on its lock. A
-    skipped row is simply reaped by whichever worker holds it — correctness was
-    never at risk (a bare UPDATE re-checks the predicate under READ COMMITTED),
-    this only removes the brief lock contention. A ``LIMIT`` could be added to
-    the CTE to bound how many rows one statement rewrites under a huge backlog.
+    Candidate rows are taken with ``FOR UPDATE SKIP LOCKED ... LIMIT`` (same
+    idiom as :func:`claim_batch`). Two effects:
+
+    * **No contention** — a concurrent reaper skips rows another is already
+      updating instead of blocking on its lock. Correctness was never at risk (a
+      bare UPDATE re-checks the predicate under READ COMMITTED); this just avoids
+      the wait.
+    * **Bounded + parallel recovery** — ``batch_size`` caps how many rows one
+      statement rewrites, so a large backlog after downtime is reclaimed across
+      several small transactions instead of one giant lock-holding UPDATE; and
+      because each worker skips the others' in-flight rows, concurrent reapers
+      partition the backlog into disjoint batches with no coordination.
 
     Args:
         conn: Connection (caller-owned transaction).
         reaper_idle_seconds: Heartbeat staleness threshold, in seconds.
+        batch_size: Maximum rows to reclaim in this transaction.
 
     Returns:
-        Number of rows reclaimed.
+        Number of rows reclaimed (``< batch_size`` means the backlog is drained).
     """
     affected, _ = await conn.execute_query(
         """
@@ -178,9 +186,10 @@ async def reap_stale(conn: BaseDBAsyncClient, reaper_idle_seconds: int) -> int:
               AND heartbeat_at
                   < statement_timestamp() - make_interval(secs => $1)
             FOR UPDATE SKIP LOCKED
+            LIMIT $2
         )
         """,
-        [reaper_idle_seconds],
+        [reaper_idle_seconds, batch_size],
     )
     return affected
 

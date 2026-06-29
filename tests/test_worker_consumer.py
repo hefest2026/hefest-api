@@ -322,6 +322,25 @@ async def test_drain_reaper_runs_once_per_wake(
     claim.assert_awaited_once()
 
 
+async def test_drain_reaper_loops_until_short_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reaper keeps reaping bounded batches until one comes back short."""
+    monkeypatch.setattr(consumer.settings, "worker_reap_batch_size", 3)
+    # Two full batches (3, 3) then a short one (1) -> drained after 3 reaps.
+    reap = AsyncMock(side_effect=[3, 3, 1])
+    monkeypatch.setattr(consumer, "reap_stale", reap)
+    monkeypatch.setattr(consumer, "claim_batch", AsyncMock(return_value=[]))
+    monkeypatch.setattr(consumer, "in_transaction", _fake_in_transaction(object()))
+
+    await consumer._drain(WORKER_ID, AsyncMock(), _heartbeat_stub(), asyncio.Event())
+
+    assert reap.await_count == 3
+    # batch_size is threaded through to the query (third positional arg).
+    assert reap.await_args is not None
+    assert reap.await_args.args[2] == 3
+
+
 async def test_drain_loops_on_full_batch_stops_on_short(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

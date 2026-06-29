@@ -85,7 +85,7 @@ async def test_reap_stale_sql_shape_and_returns_count() -> None:
     conn = AsyncMock()
     conn.execute_query.return_value = (3, [])
 
-    reclaimed = await claim.reap_stale(conn, 90)
+    reclaimed = await claim.reap_stale(conn, 90, 500)
 
     query, values = conn.execute_query.call_args.args
     assert "status='pending'" in query
@@ -93,9 +93,11 @@ async def test_reap_stale_sql_shape_and_returns_count() -> None:
     assert "status='processing'" in query
     assert "heartbeat_at" in query
     assert "make_interval(secs => $1)" in query
+    assert "FOR UPDATE SKIP LOCKED" in query
+    assert "LIMIT $2" in query
     assert "attempts" not in query
     assert "next_attempt_at" not in query
-    assert values == [90]
+    assert values == [90, 500]
     assert reclaimed == 3
 
 

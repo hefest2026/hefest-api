@@ -371,7 +371,7 @@ async def test_fencing_dead_worker_finalizer_is_noop(db: Any) -> None:
 
     # Step 3 — reaper reclaims; attempts must be unchanged
     async with in_transaction("default") as conn:
-        reaped = await reap_stale(conn, 300)
+        reaped = await reap_stale(conn, 300, 1000)
     assert reaped >= 1
 
     row = await NotificationJob.get(id=job.id)

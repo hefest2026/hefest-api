@@ -259,10 +259,24 @@ async def _drain(
         heartbeat: The lease heartbeat; its ``lease_lost`` event halts claiming.
         stop: Shutdown signal; halts claiming when set.
     """
-    async with in_transaction("default") as conn:
-        reaped = await reap_stale(conn, settings.worker_reaper_idle_seconds)
-    if reaped:
-        logger.info("Reaper reclaimed %d stale lease(s)", reaped)
+    # Reclaim stale leases in bounded batches: a large backlog after downtime is
+    # spread over several small transactions (and, via FOR UPDATE SKIP LOCKED,
+    # partitioned across concurrent workers) instead of one giant lock-holding
+    # UPDATE. Always reap at least once; keep going only while full batches come
+    # back, yielding so the heartbeat is not starved and stopping on shutdown.
+    reap_batch = settings.worker_reap_batch_size
+    total_reaped = 0
+    while True:
+        async with in_transaction("default") as conn:
+            reaped = await reap_stale(
+                conn, settings.worker_reaper_idle_seconds, reap_batch
+            )
+        total_reaped += reaped
+        if reaped < reap_batch or heartbeat.lease_lost.is_set() or stop.is_set():
+            break
+        await asyncio.sleep(0)
+    if total_reaped:
+        logger.info("Reaper reclaimed %d stale lease(s)", total_reaped)
 
     batch_size = settings.worker_claim_batch_size
     semaphore = asyncio.Semaphore(settings.worker_send_concurrency)

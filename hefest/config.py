@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     """
     worker_reaper_idle_seconds: int = 300
     """Lease age after which a claimed-but-unfinished job is reclaimed."""
+    worker_reap_batch_size: int = 1000
+    """Max stale leases reclaimed per reap transaction. Bounds the reap so a
+    large backlog after downtime is recovered in several small transactions —
+    partitioned across concurrent workers via ``FOR UPDATE SKIP LOCKED`` — rather
+    than one giant UPDATE that holds locks, spikes WAL, and stalls autovacuum."""
     worker_heartbeat_interval: int = 90
     """Lease renewal cadence; must stay <= 1/3 of worker_reaper_idle_seconds
     (300) so a live worker renews its lease at least twice before the reaper
