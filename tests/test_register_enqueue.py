@@ -23,6 +23,8 @@ from hefest.models.user import User
 from hefest.routers.auth import register
 from hefest.schemas.auth import RegisterRequest
 
+pytestmark = pytest.mark.integration
+
 
 def _register_body() -> RegisterRequest:
     """Build a RegisterRequest with a unique email (safe to delete)."""

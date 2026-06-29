@@ -55,7 +55,7 @@ jobs:
         run: uv run python scripts/ci_check_migrations.py
 
   test:
-    name: pytest
+    name: Unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,15 +63,30 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --all-groups
-      - name: pytest
-        # Exit code 5 = "no tests collected"; treat as success so branches that
-        # don't add tests yet stay green. Any real failure still fails the job.
+      - name: pytest (unit — no database)
+        # Excludes integration tests (run separately, see the integration job)
+        # and the live-stack e2e suite. Exit code 5 = "no tests collected";
+        # treat as success so branches that don't add tests yet stay green.
         run: |
           set +e
-          uv run pytest -q --ignore=tests/test_e2e_staging.py
+          uv run pytest -q -m "not integration" --ignore=tests/test_e2e_staging.py
           code=$?
           if [ "$code" -eq 5 ]; then echo "::notice::No tests collected"; exit 0; fi
           exit "$code"
+
+  integration:
+    name: Integration tests (testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-groups
+      - name: pytest (integration — ephemeral Postgres)
+        # The `db` fixture spins up Postgres via testcontainers using the
+        # runner's Docker daemon; no service container is needed here.
+        run: uv run pytest -q -m integration
 
   e2e:
     name: E2E (live stack)

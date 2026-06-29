@@ -39,6 +39,9 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "integration: needs a real database (provided via testcontainers); run as a separate CI job",
+]
 
 [tool.ty.src]
 exclude = ["migrations"]
