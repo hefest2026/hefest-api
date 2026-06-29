@@ -7,63 +7,21 @@ check, ``User.create``, the enclosing transaction, and the
 account-scoped insert because the value under test is precisely that the FK
 accepts NULL and the row lands ``pending`` for the worker.
 
-Skip gating mirrors ``test_worker_integration``: the module probes the DB at
-load and skips entirely when Postgres is unreachable, so the no-DB CI unit job
-stays green. The created ``User`` is deleted in teardown; FK ``ON DELETE
-CASCADE`` removes the enqueued job with it, so dev data is never touched.
+The ``db`` fixture (conftest.py) provides an ephemeral testcontainers Postgres,
+so this runs in CI wherever Docker is available. The created ``User`` is deleted
+in teardown; FK ``ON DELETE CASCADE`` removes the enqueued job with it.
 """
 
 from __future__ import annotations
 
-import asyncio
 import uuid
-from collections.abc import AsyncIterator
 
-import asyncpg
 import pytest
-from tortoise import Tortoise
-from tortoise.exceptions import DBConnectionError, OperationalError
 
-from hefest.config import build_worker_tortoise_orm, settings
 from hefest.models.notification_job import JobStatus, NotificationJob
 from hefest.models.user import User
 from hefest.routers.auth import register
 from hefest.schemas.auth import RegisterRequest
-
-# ---------------------------------------------------------------------------
-# Module-level skip gate
-# ---------------------------------------------------------------------------
-
-
-async def _probe_db() -> None:
-    """Connect to Postgres and execute SELECT 1; raise on failure."""
-    dsn = settings.db_url.replace("asyncpg://", "postgresql://", 1)
-    conn: asyncpg.Connection[asyncpg.Record] = await asyncpg.connect(dsn)
-    try:
-        await conn.fetchval("SELECT 1")
-    finally:
-        await conn.close()
-
-
-try:
-    asyncio.run(_probe_db())
-except (OSError, asyncpg.PostgresError, DBConnectionError, OperationalError):
-    pytest.skip("integration DB unavailable", allow_module_level=True)
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-async def db() -> AsyncIterator[None]:
-    """Initialise Tortoise for one test and close all connections on teardown."""
-    await Tortoise.init(config=build_worker_tortoise_orm())
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
 
 
 def _register_body() -> RegisterRequest:
@@ -73,11 +31,6 @@ def _register_body() -> RegisterRequest:
         password="correct-horse-battery",  # >= 12 chars
         full_name="Integration Register",
     )
-
-
-# ---------------------------------------------------------------------------
-# Test
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.usefixtures("db")
