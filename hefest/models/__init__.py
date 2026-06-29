@@ -1,3 +1,4 @@
+from hefest.models.device import Device
 from hefest.models.event import Event
 from hefest.models.notification_job import NotificationJob
 from hefest.models.notification_log import NotificationLog
@@ -14,4 +15,5 @@ __all__ = [
     "NotificationLog",
     "OAuthIdentity",
     "RefreshToken",
+    "Device",
 ]
