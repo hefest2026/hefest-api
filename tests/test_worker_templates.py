@@ -108,3 +108,30 @@ def test_event_cancelled_subject_and_body() -> None:
 def test_unknown_event_type_raises_permanent_error() -> None:
     with pytest.raises(PermanentError):
         _render("UnknownType")
+
+
+# ---------------------------------------------------------------------------
+# EmailVerify — account-scoped, no event, requires a verify link
+# ---------------------------------------------------------------------------
+
+_VERIFY_LINK = "https://app.hefest.test/verify-email?token=abc.def.ghi"
+
+
+def test_email_verify_uses_link_and_no_event() -> None:
+    result = render(
+        "EmailVerify", cast(User, _USER), None, {}, verify_link=_VERIFY_LINK
+    )
+
+    assert "verify" in result.subject.lower()
+    assert "Alice Smith" in result.body
+    assert _VERIFY_LINK in result.body
+
+
+def test_email_verify_without_link_raises_permanent_error() -> None:
+    with pytest.raises(PermanentError):
+        render("EmailVerify", cast(User, _USER), None, {})
+
+
+def test_event_scoped_type_without_event_raises_permanent_error() -> None:
+    with pytest.raises(PermanentError):
+        render("RegistrationConfirmed", cast(User, _USER), None, {})

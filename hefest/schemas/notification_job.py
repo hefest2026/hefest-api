@@ -15,7 +15,7 @@ class NotificationJobResponse(BaseModel):
     """Response for GET /notification-jobs (list)."""
 
     id: UUID
-    event_id: UUID
+    event_id: UUID | None
     event_type: str
     payload: dict[str, Any]
     status: JobStatus

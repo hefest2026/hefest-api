@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 15
     refresh_token_expire_days: int = 14
     email_verify_expire_hours: int = 24
+    email_verify_url: str = "http://localhost:5173/verify-email"
+    """Frontend page that consumes the verification token; the worker appends
+    ``?token=<jwt>`` to build the link embedded in the verification email."""
 
     # Cookie / CORS fields
     refresh_cookie_name: str = "hefest_refresh"

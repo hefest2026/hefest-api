@@ -85,6 +85,25 @@ def create_email_verify_token(user: User) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
+def build_email_verify_link(user: User) -> str:
+    """Build the full verification link to embed in a verification email.
+
+    Mints a fresh stateless verification JWT for ``user`` and appends it to the
+    configured ``email_verify_url`` as a ``token`` query parameter. Because the
+    token is stateless, the delivery worker can call this at send time without
+    any shared state with the API process that created the account.
+
+    Args:
+        user: The User the verification link is for.
+
+    Returns:
+        An absolute URL such as ``https://app/verify-email?token=<jwt>``.
+    """
+    token = create_email_verify_token(user)
+    separator = "&" if "?" in settings.email_verify_url else "?"
+    return f"{settings.email_verify_url}{separator}token={token}"
+
+
 async def consume_email_verify_token(token: str) -> User:
     """Decode and consume an email verification token; set email_verified_at.
 

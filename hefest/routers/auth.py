@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
+from tortoise.transactions import in_transaction
 
 from hefest.config import settings
+from hefest.models.notification_job import NotificationJob
 from hefest.models.user import User, UserRole
 from hefest.routers.deps import get_current_user
 from hefest.schemas.auth import (
@@ -21,29 +23,38 @@ router = APIRouter(tags=["auth"])
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(body: RegisterRequest) -> dict[str, str]:
-    """Register a new unverified student account."""
-    from hefest.models.user import User
-
+    """Register a new unverified student account and enqueue its verify email."""
     if await User.exists(email=body.email):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="email already registered",
             headers={"X-Error-Code": "email_exists"},
         )
-    user = await User.create(
-        email=body.email,
-        password_hash=auth_svc.hash_password(body.password),
-        full_name=body.full_name,
-        role=UserRole.student,
-        email_verified_at=None,
-    )
-    # TODO: enqueue verification email via notification pipeline (outbox)
-    verify_token = auth_svc.create_email_verify_token(user)
+    # User row and its verification outbox job are written in one transaction so
+    # the AFTER INSERT NOTIFY fires at COMMIT and the account can never exist
+    # without its pending verification email. The job is account-scoped: no
+    # event, payload carries only the student id (worker mints the token).
+    async with in_transaction("default") as conn:
+        user = await User.create(
+            email=body.email,
+            password_hash=auth_svc.hash_password(body.password),
+            full_name=body.full_name,
+            role=UserRole.student,
+            email_verified_at=None,
+            using_db=conn,
+        )
+        await NotificationJob.create(
+            event=None,
+            event_type="EmailVerify",
+            payload={"student_id": str(user.id)},
+            idempotency_key=f"{user.id}:EmailVerify",
+            using_db=conn,
+        )
     response_body: dict[str, str] = {
         "message": "registered; check your email to verify your account"
     }
     if settings.env == "dev":
-        response_body["verify_token"] = verify_token
+        response_body["verify_token"] = auth_svc.create_email_verify_token(user)
     return response_body
 
 
