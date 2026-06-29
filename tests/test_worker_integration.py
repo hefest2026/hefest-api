@@ -5,12 +5,12 @@ decision matrix in the consumer, and the cancel-event fan-out against a real
 database.  A ``StubMailer`` replaces the real SMTP mailer so sends are
 deterministic and no network is needed.
 
-Skip gating
------------
-At module load the test probes the DB with a raw asyncpg connection.  If
-Postgres is unreachable (OSError / asyncpg error) the entire module skips via
-``pytest.skip(allow_module_level=True)`` so the CI unit-test job — which has
-no database — stays green.
+Database
+--------
+The ``db`` fixture (conftest.py) provides an ephemeral ``postgres:16-alpine``
+container spun up once per session via testcontainers, with the schema created
+by ``generate_schemas``. The tests therefore run in CI wherever Docker is
+available and skip only when no Docker daemon is reachable.
 
 Isolation
 ---------
@@ -18,16 +18,15 @@ Each test creates its own ``User`` / ``Event`` / ``Registration`` /
 ``NotificationJob`` rows with fresh UUIDs and deletes exactly those ``User``
 rows in teardown.  FK ``ON DELETE CASCADE`` (user→events→registrations/
 notification_jobs) cleans every derived row automatically.  No ``TRUNCATE``
-is used, so dev data is never touched.
+is used.
 
-Dev-data co-existence
----------------------
+Row-scoped claims
+-----------------
 Tests use ``_claim_job_by_id`` to claim only their own specific rows rather
-than the broad ``claim_batch`` / ``_drain`` helpers that would also claim
-unrelated pending jobs from dev seeds.  Tests 2 and 4 use ``claim_batch``
-only against jobs they inserted (test 2 does one job; test 4 uses n=20 jobs
-on a fresh event whose start-time is far in the future and whose jobs are
-the only pending rows on that event).
+than the broad ``claim_batch`` / ``_drain`` helpers.  Tests 2 and 4 use
+``claim_batch`` only against jobs they inserted (test 2 does one job; test 4
+uses n=20 jobs on a fresh event whose jobs are the only pending rows on that
+event).  The database starts empty, so this scoping is defensive, not required.
 
 HTTP-layer note
 ---------------
@@ -45,14 +44,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-import asyncpg
 import orjson
-import pytest
-from tortoise import Tortoise
-from tortoise.exceptions import DBConnectionError, OperationalError
 from tortoise.transactions import in_transaction
 
-from hefest.config import build_worker_tortoise_orm, settings
+from hefest.config import settings
 from hefest.models.event import Event, EventStatus
 from hefest.models.notification_job import JobStatus, NotificationJob
 from hefest.models.registration import Registration, RegistrationStatus
@@ -69,25 +64,9 @@ from hefest.worker.claim import (
 from hefest.worker.mailer import TransientSendError
 from hefest.worker.templates import EmailContent
 
-# ---------------------------------------------------------------------------
-# Module-level skip gate
-# ---------------------------------------------------------------------------
-
-
-async def _probe_db() -> None:
-    """Connect to Postgres and execute SELECT 1; raise on failure."""
-    dsn = settings.db_url.replace("asyncpg://", "postgresql://", 1)
-    conn: asyncpg.Connection[asyncpg.Record] = await asyncpg.connect(dsn)
-    try:
-        await conn.fetchval("SELECT 1")
-    finally:
-        await conn.close()
-
-
-try:
-    asyncio.run(_probe_db())
-except (OSError, asyncpg.PostgresError, DBConnectionError, OperationalError):
-    pytest.skip("integration DB unavailable", allow_module_level=True)
+# The ephemeral Postgres + Tortoise lifecycle is owned by the session-scoped
+# ``pg_container`` / ``db`` fixtures in conftest.py. Tests opt in via ``db``;
+# Docker-unavailable runs skip there with a clear reason.
 
 
 # ---------------------------------------------------------------------------
@@ -135,26 +114,6 @@ class _StubHeartbeat:
 
     def __init__(self) -> None:
         self.lease_lost: asyncio.Event = asyncio.Event()
-
-
-# ---------------------------------------------------------------------------
-# Tortoise lifecycle fixture
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-async def db() -> Any:
-    """Open a Tortoise connection pool for one test and close it on teardown.
-
-    Yields control to the test body with Tortoise fully initialised; closes all
-    connections after the test (including after assertion failures).
-    """
-    cfg = build_worker_tortoise_orm()
-    await Tortoise.init(config=cfg)
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
 
 
 # ---------------------------------------------------------------------------
