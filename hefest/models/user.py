@@ -7,6 +7,7 @@ from tortoise import fields
 from tortoise.models import Model
 
 if TYPE_CHECKING:
+    from hefest.models.device import Device as DeviceModel
     from hefest.models.event import Event
     from hefest.models.oauth_identity import OAuthIdentity as OAuthIdentityModel
     from hefest.models.refresh_token import RefreshToken as RefreshTokenModel
@@ -34,6 +35,7 @@ class User(Model):
     registrations: fields.ReverseRelation[Registration]
     refresh_tokens: fields.ReverseRelation[RefreshTokenModel]
     oauth_identities: fields.ReverseRelation[OAuthIdentityModel]
+    devices: fields.ReverseRelation[DeviceModel]
 
     class Meta:
         table = "users"
