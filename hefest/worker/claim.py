@@ -153,6 +153,14 @@ async def reap_stale(conn: BaseDBAsyncClient, reaper_idle_seconds: int) -> int:
     claim already consumed an attempt) or ``next_attempt_at`` (the row is due
     again immediately).
 
+    Candidate rows are taken with ``FOR UPDATE SKIP LOCKED`` (same idiom as
+    :func:`claim_batch`), so when two workers reap concurrently the second skips
+    any row the first is already updating instead of blocking on its lock. A
+    skipped row is simply reaped by whichever worker holds it — correctness was
+    never at risk (a bare UPDATE re-checks the predicate under READ COMMITTED),
+    this only removes the brief lock contention. A ``LIMIT`` could be added to
+    the CTE to bound how many rows one statement rewrites under a huge backlog.
+
     Args:
         conn: Connection (caller-owned transaction).
         reaper_idle_seconds: Heartbeat staleness threshold, in seconds.
@@ -164,9 +172,13 @@ async def reap_stale(conn: BaseDBAsyncClient, reaper_idle_seconds: int) -> int:
         """
         UPDATE notification_jobs
         SET status='pending', locked_by=NULL, updated_at=statement_timestamp()
-        WHERE status='processing'
-          AND heartbeat_at
-              < statement_timestamp() - make_interval(secs => $1)
+        WHERE id IN (
+            SELECT id FROM notification_jobs
+            WHERE status='processing'
+              AND heartbeat_at
+                  < statement_timestamp() - make_interval(secs => $1)
+            FOR UPDATE SKIP LOCKED
+        )
         """,
         [reaper_idle_seconds],
     )
