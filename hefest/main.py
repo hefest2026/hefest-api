@@ -17,6 +17,7 @@ from hefest.config import TORTOISE_ORM, settings
 from hefest.logging import configure_logging
 from hefest.middleware.rate_limit import SLIDING_WINDOW_LUA, RateLimitMiddleware
 from hefest.routers.auth import router as auth_router
+from hefest.routers.device import router as device_router
 from hefest.routers.events import router as events_router
 from hefest.routers.internal import router as internal_router
 from hefest.routers.notification_jobs import router as notification_jobs_router
@@ -72,6 +73,7 @@ app.include_router(sso_router)
 app.include_router(events_router)
 app.include_router(registrations_router)
 app.include_router(notification_jobs_router)
+app.include_router(device_router)
 if settings.env != "production":
     app.include_router(internal_router)
 

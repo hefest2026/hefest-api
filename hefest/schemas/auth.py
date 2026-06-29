@@ -71,11 +71,15 @@ class TokenResponse(BaseModel):
         access_token: JWT access token
         token_type: Token type (default: "bearer")
         expires_in: Token expiration time in seconds
+        refresh_token: Opaque refresh token, returned only to mobile clients
+            (``X-Client-Id: mobile_app``) for storage in the device keystore.
+            ``None`` for web clients, which receive it via the httpOnly cookie.
     """
 
     access_token: str
     token_type: str = "bearer"
     expires_in: int
+    refresh_token: str | None = None
 
 
 class OAuthProviderInfo(BaseModel):
