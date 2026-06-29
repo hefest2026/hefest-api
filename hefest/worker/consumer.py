@@ -14,6 +14,12 @@ is NEVER held open across a send. Every finalizer is fenced and returns a
 ``bool``: ``False`` means the lease was reclaimed mid-send, so the result is
 DISCARDED — never resent, never restamped.
 
+Delivery is **at-least-once**: the send happens outside any transaction, so a
+crash or DB outage between a successful send and its finalizer leaves the job
+``processing`` for the reaper to retry, resending the email. ``_commit_finalizer``
+retries transient DB failures to shrink this window, but consumers must tolerate
+rare duplicates.
+
 Liveness self-abort (spec §4, §6.2)
 -----------------------------------
 The consumer stops claiming new work the moment ``heartbeat.lease_lost`` is set.
@@ -36,6 +42,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING
 
 import asyncpg
+from tortoise.exceptions import DBConnectionError, OperationalError
 from tortoise.transactions import in_transaction
 
 from hefest.config import settings
@@ -67,6 +74,24 @@ _RECONNECT_BACKOFF_MAX: float = 30.0
 # the socket alive and surfaces a silently dropped connection as a raised error.
 _LISTEN_HEARTBEAT_SECONDS: float = 30.0
 
+# Finalizer commit retry: a successful send has already happened by the time a
+# finalizer runs, so a brief DB blip (failover, connection drop, timeout) on the
+# state write must not abandon the job in `processing` — the reaper would later
+# resend the email. Retry transient connection/operational errors a few times
+# with short backoff; logical errors and an exhausted budget propagate.
+_FINALIZE_MAX_ATTEMPTS: int = 3
+_FINALIZE_RETRY_BASE_SECONDS: float = 0.5
+# Transient DB failures worth retrying. Logical errors (IntegrityError, etc.)
+# are deliberately excluded. asyncpg connection errors surface either directly
+# or wrapped by Tortoise as DBConnectionError/OperationalError; OSError covers
+# socket-level drops (and TimeoutError, its subclass).
+_TRANSIENT_DB_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    DBConnectionError,
+    OperationalError,
+    asyncpg.PostgresConnectionError,
+)
+
 
 async def _finalize(
     finalizer: Callable[..., Awaitable[bool]],
@@ -80,6 +105,10 @@ async def _finalize(
     fence reports the lease was reclaimed mid-send (``False`` = 0 rows) — logs
     and discards the result. It never resends or restamps a lost lease.
 
+    The commit is retried across transient DB failures (see
+    :func:`_commit_finalizer`) so a brief outage between a successful send and
+    the state write does not strand the job for the reaper to resend.
+
     Args:
         finalizer: A fenced finalizer (``mark_completed``/``mark_retry``/
             ``mark_failed``) taking ``(conn, job_id, worker_id, **kwargs)``.
@@ -88,14 +117,69 @@ async def _finalize(
         **kwargs: Extra finalizer arguments (e.g. ``last_error``,
             ``delay_seconds``).
     """
-    async with in_transaction("default") as conn:
-        held = await finalizer(conn, job.id, worker_id, **kwargs)
+    held = await _commit_finalizer(finalizer, job, worker_id, **kwargs)
     if not held:
         logger.warning(
             "Lease lost finalizing job %s via %s; discarding result",
             job.id,
             getattr(finalizer, "__name__", finalizer),
         )
+
+
+async def _commit_finalizer(
+    finalizer: Callable[..., Awaitable[bool]],
+    job: ClaimedJob,
+    worker_id: str,
+    **kwargs: object,
+) -> bool:
+    """Run the finalizer transaction, retrying transient DB failures.
+
+    The terminal write is fenced and idempotent: on a retry where a prior
+    attempt actually committed, the finalizer matches 0 rows and returns
+    ``False`` (logged as a discarded result), so retrying can never double-apply
+    or resend.
+
+    Args:
+        finalizer: The fenced finalizer to run.
+        job: The job being finalized.
+        worker_id: This worker's fencing token.
+        **kwargs: Extra finalizer arguments.
+
+    Returns:
+        The finalizer's fence result (``True`` applied, ``False`` lease lost).
+
+    Raises:
+        Exception: The last transient DB error once the retry budget is
+            exhausted, or any non-transient error immediately.
+    """
+    for attempt in range(1, _FINALIZE_MAX_ATTEMPTS + 1):
+        try:
+            async with in_transaction("default") as conn:
+                return await finalizer(conn, job.id, worker_id, **kwargs)
+        except _TRANSIENT_DB_ERRORS as exc:
+            if attempt == _FINALIZE_MAX_ATTEMPTS:
+                logger.error(
+                    "Transient DB error finalizing job %s via %s; exhausted %d "
+                    "attempts — job stays claimed and may resend after reaping: "
+                    "%s",
+                    job.id,
+                    getattr(finalizer, "__name__", finalizer),
+                    _FINALIZE_MAX_ATTEMPTS,
+                    exc,
+                )
+                raise
+            delay = _FINALIZE_RETRY_BASE_SECONDS * attempt
+            logger.warning(
+                "Transient DB error finalizing job %s (attempt %d/%d); retrying "
+                "in %.1fs: %s",
+                job.id,
+                attempt,
+                _FINALIZE_MAX_ATTEMPTS,
+                delay,
+                exc,
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")  # loop always returns or raises
 
 
 async def _process_one(job: ClaimedJob, worker_id: str, mailer: Mailer) -> None:
@@ -195,9 +279,15 @@ async def _drain(
         if not jobs:
             return
 
-        await asyncio.gather(
-            *(_bounded_process(semaphore, job, worker_id, mailer) for job in jobs)
-        )
+        # TaskGroup (not bare gather): if one job raises an unexpected error,
+        # its siblings are cancelled and awaited before the group propagates,
+        # leaving no in-flight sends running on the loop. Bare gather would let
+        # them survive — harmless under a restarting container, but a source of
+        # cross-test interference and teardown races. Expected per-job failures
+        # never reach here (they are handled inside _process_one).
+        async with asyncio.TaskGroup() as tg:
+            for job in jobs:
+                tg.create_task(_bounded_process(semaphore, job, worker_id, mailer))
 
         # Yield so a saturated queue never starves the heartbeat task (spec §6.2).
         await asyncio.sleep(0)

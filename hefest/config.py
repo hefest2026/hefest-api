@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, Self
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SUPPORTED_OAUTH_PROVIDERS: Final = ("google", "microsoft")
+
+WORKER_DB_POOL_HEADROOM: Final = 3
+"""Connections the worker needs beyond its in-flight sends: the claim, the
+heartbeat, and the reaper queries run concurrently with finalizers, so
+``worker_db_pool_size`` must leave at least this much room above
+``worker_send_concurrency``."""
 
 
 class Settings(BaseSettings):
@@ -130,6 +137,34 @@ class Settings(BaseSettings):
         ):
             out.append("microsoft")
         return out
+
+    @model_validator(mode="after")
+    def _validate_worker_pool_headroom(self) -> Self:
+        """Fail fast if the worker DB pool can't serve all concurrent sends.
+
+        Each in-flight send finalizes in its own transaction (one pooled
+        connection), concurrently with the heartbeat and reaper. If
+        ``worker_db_pool_size`` is smaller than ``worker_send_concurrency``
+        plus :data:`WORKER_DB_POOL_HEADROOM`, finalizers stall waiting for a
+        connection and can time out — turning a successful send into a
+        duplicate once the reaper reclaims the still-``processing`` job. Surface
+        the misconfiguration at startup rather than under load.
+
+        Returns:
+            The validated settings instance.
+
+        Raises:
+            ValueError: If the pool is too small for the configured concurrency.
+        """
+        required = self.worker_send_concurrency + WORKER_DB_POOL_HEADROOM
+        if self.worker_db_pool_size < required:
+            raise ValueError(
+                f"worker_db_pool_size ({self.worker_db_pool_size}) must be >= "
+                f"worker_send_concurrency ({self.worker_send_concurrency}) + "
+                f"{WORKER_DB_POOL_HEADROOM} headroom (= {required}) for the "
+                "claim, heartbeat, and reaper queries"
+            )
+        return self
 
 
 settings = Settings()

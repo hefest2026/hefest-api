@@ -24,6 +24,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from tortoise.exceptions import OperationalError
 
 from hefest.worker import consumer
 from hefest.worker.claim import ClaimedJob
@@ -242,6 +243,54 @@ async def test_unexpected_error_propagates(
 
     finalizers["mark_failed"].assert_not_awaited()
     finalizers["mark_retry"].assert_not_awaited()
+
+
+# --------------------------------------------------------------------------- #
+# _finalize transient-DB retry (post-send durability)
+# --------------------------------------------------------------------------- #
+async def test_finalize_retries_transient_db_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient DB blip during finalize is retried, not propagated."""
+    monkeypatch.setattr(consumer, "in_transaction", _fake_in_transaction(object()))
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        consumer.asyncio, "sleep", AsyncMock(side_effect=lambda d: sleeps.append(d))
+    )
+    finalizer = AsyncMock(side_effect=[OperationalError("blip"), True], __name__="mark")
+
+    await consumer._finalize(finalizer, _job(), WORKER_ID)
+
+    assert finalizer.await_count == 2  # failed once, then committed
+    assert len(sleeps) == 1  # one backoff between the two attempts
+
+
+async def test_finalize_propagates_after_exhausting_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persistent DB outage propagates so the reaper can recover the job."""
+    monkeypatch.setattr(consumer, "in_transaction", _fake_in_transaction(object()))
+    monkeypatch.setattr(consumer.asyncio, "sleep", AsyncMock())
+    finalizer = AsyncMock(side_effect=OperationalError("down"), __name__="mark")
+
+    with pytest.raises(OperationalError, match="down"):
+        await consumer._finalize(finalizer, _job(), WORKER_ID)
+
+    assert finalizer.await_count == consumer._FINALIZE_MAX_ATTEMPTS
+
+
+async def test_finalize_does_not_retry_logical_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-transient (logical) error is not retried — it surfaces at once."""
+    monkeypatch.setattr(consumer, "in_transaction", _fake_in_transaction(object()))
+    monkeypatch.setattr(consumer.asyncio, "sleep", AsyncMock())
+    finalizer = AsyncMock(side_effect=ValueError("bug"), __name__="mark")
+
+    with pytest.raises(ValueError, match="bug"):
+        await consumer._finalize(finalizer, _job(), WORKER_ID)
+
+    finalizer.assert_awaited_once()  # no retry
 
 
 # --------------------------------------------------------------------------- #
