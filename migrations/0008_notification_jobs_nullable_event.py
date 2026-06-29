@@ -10,9 +10,16 @@ class Migration(migrations.Migration):
     ``event_id`` foreign key therefore becomes nullable so an ``EmailVerify``
     job can be enqueued with ``event_id = NULL``. The FK and its ``ON DELETE
     CASCADE`` are unchanged for event-scoped rows; NULL simply bypasses it.
+
+    Migration-head merge: HEF-39 (outbox) and HEF-44/45 (refresh-client +
+    device) forked off ``0005`` into two independent heads. This migration
+    depends on both so the history collapses back to a single head.
     """
 
-    dependencies = [("models", "0006_notification_jobs_outbox_delivery")]
+    dependencies = [
+        ("models", "0006_notification_jobs_outbox_delivery"),
+        ("models", "0007_device"),
+    ]
 
     initial = False
 
