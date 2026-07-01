@@ -11,10 +11,12 @@ from hefest.models.refresh_token import RefreshClient
 from hefest.models.user import User, UserRole
 from hefest.routers.deps import get_current_user, get_refresh_client
 from hefest.schemas.auth import (
+    ChangePasswordRequest,
     LoginRequest,
     RegisterRequest,
     TokenResponse,
     UserMeResponse,
+    UserUpdateRequest,
     VerifyEmailRequest,
 )
 from hefest.services import auth as auth_svc
@@ -198,6 +200,42 @@ async def logout(
 async def get_me(user: User = Depends(get_current_user)) -> UserMeResponse:
     """Return the profile of the currently authenticated user."""
     return UserMeResponse.model_validate(user)
+
+
+@router.patch("/users/me", response_model=UserMeResponse)
+async def update_me(
+    body: UserUpdateRequest,
+    user: User = Depends(get_current_user),
+) -> UserMeResponse:
+    """Update the current user's editable profile fields (display name)."""
+    user.full_name = body.full_name
+    await user.save(update_fields=["full_name"])
+    return UserMeResponse.model_validate(user)
+
+
+@router.post("/auth/change-password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(
+    body: ChangePasswordRequest,
+    response: Response,
+    user: User = Depends(get_current_user),
+) -> None:
+    """Change the current user's password after re-verifying the current one.
+
+    On success every refresh token for the user is revoked so other sessions are
+    forced to re-authenticate, and the local refresh cookie is cleared.
+    """
+    if user.password_hash is None or not auth_svc.verify_password(
+        body.current_password, user.password_hash
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="current password is incorrect",
+            headers={"X-Error-Code": "invalid_credentials"},
+        )
+    user.password_hash = auth_svc.hash_password(body.new_password)
+    await user.save(update_fields=["password_hash"])
+    await auth_svc.revoke_all_for_user(str(user.id))
+    response.delete_cookie(key=settings.refresh_cookie_name, path="/auth")
 
 
 @router.post("/auth/logout-all", status_code=status.HTTP_204_NO_CONTENT)

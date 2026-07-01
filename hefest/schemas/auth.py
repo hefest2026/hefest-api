@@ -108,6 +108,38 @@ class ProvidersResponse(BaseModel):
     providers: list[OAuthProviderInfo]
 
 
+def _full_name_validator(v: str) -> str:
+    """Validate and normalize a display name: trimmed and non-empty."""
+    trimmed = v.strip()
+    if not trimmed:
+        raise ValueError("Full name must not be empty")
+    if len(trimmed) > 200:
+        raise ValueError("Full name must be at most 200 characters long")
+    return trimmed
+
+
+class UserUpdateRequest(BaseModel):
+    """Request schema for updating the current user's profile.
+
+    Attributes:
+        full_name: New display name (trimmed, non-empty, max 200 chars).
+    """
+
+    full_name: Annotated[str, AfterValidator(_full_name_validator)]
+
+
+class ChangePasswordRequest(BaseModel):
+    """Request schema for changing the current user's password.
+
+    Attributes:
+        current_password: The user's existing password, for re-authentication.
+        new_password: The replacement password (minimum 12 characters).
+    """
+
+    current_password: str
+    new_password: Annotated[str, AfterValidator(_password_validator)]
+
+
 class UserMeResponse(BaseModel):
     """Response schema for the current authenticated user.
 
