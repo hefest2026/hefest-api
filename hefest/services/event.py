@@ -53,8 +53,10 @@ async def create_event(organizer: User, data: EventCreateRequest) -> Event:
 async def list_events(user: User, *, limit: int = 100, offset: int = 0) -> list[Event]:
     """Return events visible to the caller with confirmed registration counts.
 
-    Students see only published events. Organizers see their own events plus
-    all published events from other organizers.
+    Students see only published events that have not yet started. Organizers
+    see their own events (any status/time) plus all published events from other
+    organizers; already-started events carry a ``has_started`` flag in the
+    response so the dashboard can mark them.
 
     Args:
         user: The authenticated user.
@@ -71,7 +73,7 @@ async def list_events(user: User, *, limit: int = 100, offset: int = 0) -> list[
     )
     if user.role == UserRole.student:
         return await (
-            Event.filter(status=EventStatus.published)
+            Event.filter(status=EventStatus.published, starts_at__gt=datetime.now(UTC))
             .annotate(confirmed_count=confirmed_annotation)
             .order_by("-starts_at")
             .offset(offset)

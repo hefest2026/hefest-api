@@ -39,7 +39,8 @@ async def register_student(
 
     Raises:
         HTTPException 404: Event not found or not published.
-        HTTPException 409: Student already has an active registration.
+        HTTPException 409: Event already started, or student already has an
+            active registration.
     """
     async with in_transaction() as conn:
         event = (
@@ -51,6 +52,16 @@ async def register_student(
         if event is None or event.status != EventStatus.published:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
+            )
+
+        starts_at = event.starts_at
+        if starts_at.tzinfo is None:
+            starts_at = starts_at.replace(tzinfo=UTC)
+        if starts_at <= datetime.now(UTC):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="event already started",
+                headers={"X-Error-Code": "event_already_started"},
             )
 
         confirmed_count = await (

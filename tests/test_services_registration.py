@@ -240,6 +240,23 @@ class TestRegisterStudent:
 
         assert exc.value.status_code == 404
 
+    async def test_started_event_raises_409(self) -> None:
+        student = _user()
+        past = datetime.now(UTC) - timedelta(hours=1)
+        evt = _event(status=EventStatus.published, starts_at=past)
+        event_qs = _qs(get=evt)
+
+        with (
+            patch("hefest.services.registration.in_transaction", _mock_tx()),
+            patch.object(svc.Event, "filter", return_value=event_qs),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await svc.register_student(student, evt.id)
+
+        assert exc.value.status_code == 409
+        assert exc.value.headers is not None
+        assert exc.value.headers["X-Error-Code"] == "event_already_started"
+
     async def test_duplicate_registration_raises_409(self) -> None:
         student = _user()
         evt = _event(capacity=10)

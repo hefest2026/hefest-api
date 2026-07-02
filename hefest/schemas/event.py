@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 from hefest.models.event import EventStatus
 
@@ -63,6 +63,19 @@ class EventResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def has_started(self) -> bool:
+        """Whether the event's start time has passed (UTC).
+
+        Students never see started events in the listing; organizers use this
+        flag to mark their own past-start events in the dashboard.
+        """
+        starts_at = self.starts_at
+        if starts_at.tzinfo is None:
+            starts_at = starts_at.replace(tzinfo=UTC)
+        return starts_at <= datetime.now(UTC)
 
 
 class EventDetailResponse(EventResponse):

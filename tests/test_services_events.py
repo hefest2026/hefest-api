@@ -17,7 +17,11 @@ from fastapi import HTTPException
 from hefest.models.event import EventStatus
 from hefest.models.registration import RegistrationStatus
 from hefest.models.user import UserRole
-from hefest.schemas.event import EventCreateRequest, EventUpdateRequest
+from hefest.schemas.event import (
+    EventCreateRequest,
+    EventResponse,
+    EventUpdateRequest,
+)
 from hefest.services import event as svc
 
 UTC = UTC
@@ -136,16 +140,22 @@ class TestListEvents:
         qs.limit = AsyncMock(return_value=items)
         return qs
 
-    async def test_student_sees_only_published(self) -> None:
+    async def test_student_sees_only_published_and_not_started(self) -> None:
         student = _user(UserRole.student)
         published = [_event(status=EventStatus.published)]
 
+        before = datetime.now(UTC)
         with patch.object(
             svc.Event, "filter", return_value=self._paginated_qs(published)
         ) as mock_filter:
             result = await svc.list_events(student)
+        after = datetime.now(UTC)
 
-        mock_filter.assert_called_once_with(status=EventStatus.published)
+        mock_filter.assert_called_once()
+        _, kwargs = mock_filter.call_args
+        assert kwargs["status"] == EventStatus.published
+        # Started events are excluded via a starts_at > now() lower bound.
+        assert before <= kwargs["starts_at__gt"] <= after
         assert result == published
 
     async def test_organizer_sees_own_and_published(self) -> None:
@@ -570,3 +580,29 @@ class TestEventCreateRequestValidation:
         ends = datetime(2026, 8, 1, tzinfo=UTC)
         with pytest.raises(Exception):
             _create_request(starts_at=starts, ends_at=ends)
+
+
+# ---------------------------------------------------------------------------
+# EventResponse.has_started (organizer-facing marker)
+# ---------------------------------------------------------------------------
+
+
+class TestHasStartedField:
+    """The has_started computed flag reflects starts_at vs now (UTC)."""
+
+    def _response(self, starts_at: datetime) -> EventResponse:
+        evt = _event(starts_at=starts_at)
+        evt.confirmed_count = 0
+        return EventResponse.model_validate(evt)
+
+    def test_future_event_not_started(self) -> None:
+        future = datetime.now(UTC) + timedelta(hours=1)
+        assert self._response(future).has_started is False
+
+    def test_past_event_started(self) -> None:
+        past = datetime.now(UTC) - timedelta(hours=1)
+        assert self._response(past).has_started is True
+
+    def test_naive_starts_at_treated_as_utc(self) -> None:
+        naive_past = (datetime.now(UTC) - timedelta(hours=1)).replace(tzinfo=None)
+        assert self._response(naive_past).has_started is True
