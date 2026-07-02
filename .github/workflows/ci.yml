@@ -55,7 +55,7 @@ jobs:
         run: uv run python scripts/ci_check_migrations.py
 
   test:
-    name: pytest
+    name: Unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,15 +63,30 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --all-groups
-      - name: pytest
-        # Exit code 5 = "no tests collected"; treat as success so branches that
-        # don't add tests yet stay green. Any real failure still fails the job.
+      - name: pytest (unit — no database)
+        # Excludes integration tests (run separately, see the integration job)
+        # and the live-stack e2e suite. Exit code 5 = "no tests collected";
+        # treat as success so branches that don't add tests yet stay green.
         run: |
           set +e
-          uv run pytest -q --ignore=tests/test_e2e_staging.py
+          uv run pytest -q -m "not integration" --ignore=tests/test_e2e_staging.py
           code=$?
           if [ "$code" -eq 5 ]; then echo "::notice::No tests collected"; exit 0; fi
           exit "$code"
+
+  integration:
+    name: Integration tests (testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-groups
+      - name: pytest (integration — ephemeral Postgres)
+        # The `db` fixture spins up Postgres via testcontainers using the
+        # runner's Docker daemon; no service container is needed here.
+        run: uv run pytest -q -m integration
 
   e2e:
     name: E2E (live stack)
@@ -99,12 +114,25 @@ jobs:
           --health-retries 10
         ports:
           - 6379:6379
+      # Mail catcher: the worker delivers here over SMTP (1025) and the e2e
+      # email-delivery test queries received mail over the HTTP API (8025).
+      # The axllent/mailpit image has no shell/curl, so no service health-cmd;
+      # it boots fast and the worker/test retry until it is reachable.
+      mailpit:
+        image: axllent/mailpit:latest
+        ports:
+          - 1025:1025
+          - 8025:8025
     env:
       PYTHONPATH: .
       HEFEST_DB_URL: asyncpg://hefest:hefest@localhost:5432/hefest_db
       HEFEST_REDIS_URL: redis://localhost:6379
       HEFEST_JWT_SECRET: ci-e2e-secret-not-for-production
       HEFEST_ENV: dev
+      # Worker delivery target — the mailpit service above.
+      HEFEST_SMTP_HOST: localhost
+      HEFEST_SMTP_PORT: "1025"
+      HEFEST_SMTP_USE_TLS: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -132,6 +160,11 @@ jobs:
             --log-level warning &
           echo $! > /tmp/uvicorn.pid
 
+      - name: Start notification worker in background
+        run: |
+          uv run python -m hefest.worker &
+          echo $! > /tmp/worker.pid
+
       - name: Wait for API to be healthy
         run: |
           for i in $(seq 1 20); do
@@ -146,8 +179,12 @@ jobs:
       - name: Run E2E suite
         env:
           HEFEST_STAGING_URL: http://localhost:8000
+          # Enables the email-delivery test; absent against real staging (Resend).
+          HEFEST_MAILPIT_URL: http://localhost:8025
         run: uv run pytest tests/test_e2e_staging.py -v --tb=short
 
-      - name: Stop API
+      - name: Stop API and worker
         if: always()
-        run: kill $(cat /tmp/uvicorn.pid) 2>/dev/null || true
+        run: |
+          kill "$(cat /tmp/uvicorn.pid)" 2>/dev/null || true
+          kill "$(cat /tmp/worker.pid)" 2>/dev/null || true

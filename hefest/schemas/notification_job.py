@@ -9,14 +9,13 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from hefest.models.notification_job import JobStatus
-from hefest.models.notification_log import DeliveryStatus
 
 
 class NotificationJobResponse(BaseModel):
     """Response for GET /notification-jobs (list)."""
 
     id: UUID
-    event_id: UUID
+    event_id: UUID | None
     event_type: str
     payload: dict[str, Any]
     status: JobStatus
@@ -28,6 +27,6 @@ class NotificationJobResponse(BaseModel):
 
 
 class NotificationJobDetailResponse(NotificationJobResponse):
-    """Response for GET /notification-jobs/{id} — includes delivery status."""
+    """Response for GET /notification-jobs/{id} — includes the delivery diagnostic."""
 
-    delivery_status: DeliveryStatus | None
+    last_error: str | None

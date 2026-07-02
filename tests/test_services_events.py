@@ -6,6 +6,7 @@ All Tortoise ORM calls are mocked so no database is required.
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,6 +15,7 @@ import pytest
 from fastapi import HTTPException
 
 from hefest.models.event import EventStatus
+from hefest.models.registration import RegistrationStatus
 from hefest.models.user import UserRole
 from hefest.schemas.event import EventCreateRequest, EventUpdateRequest
 from hefest.services import event as svc
@@ -23,6 +25,40 @@ UTC = UTC
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _null_tx() -> Any:
+    """No-op async context manager that replaces in_transaction()."""
+    yield None
+
+
+def _mock_tx() -> MagicMock:
+    m = MagicMock()
+    m.side_effect = lambda: _null_tx()
+    return m
+
+
+def _event_qs(get: Any = None) -> MagicMock:
+    """Mock Event.filter chain: .using_db().select_for_update().get_or_none()."""
+    qs = MagicMock()
+    qs.using_db.return_value = qs
+    qs.select_for_update.return_value = qs
+    qs.get_or_none = AsyncMock(return_value=get)
+    return qs
+
+
+def _reg_list_qs(items: list[Any] | None = None) -> MagicMock:
+    """Mock Registration.filter chain awaited as a list.
+
+    Models the pattern: ``await Registration.filter(...).using_db(conn)``
+    where ``using_db`` is an AsyncMock so that awaiting its call returns the
+    list directly (calling an AsyncMock returns a coroutine; awaiting that
+    coroutine yields the ``return_value``).
+    """
+    qs = MagicMock()
+    qs.using_db = AsyncMock(return_value=items or [])
+    return qs
 
 
 def _user(role: UserRole = UserRole.organizer, user_id: str | None = None) -> MagicMock:
@@ -177,35 +213,86 @@ class TestPublishEvent:
 # ---------------------------------------------------------------------------
 
 
+def _reg(
+    event_id: uuid.UUID | None = None,
+    status: RegistrationStatus = RegistrationStatus.confirmed,
+) -> MagicMock:
+    """Build a mock Registration row."""
+    r = MagicMock()
+    r.id = uuid.uuid4()
+    r.student_id = uuid.uuid4()
+    r.event_id = event_id or uuid.uuid4()
+    r.status = status
+    return r
+
+
 class TestCancelEvent:
+    """Tests for cancel_event — covers status transitions and fan-out jobs."""
+
+    def _patches(
+        self,
+        evt: Any,
+        regs: list[Any] | None = None,
+    ) -> tuple[Any, Any, Any, Any]:
+        """Return context managers for the standard cancel_event mock set."""
+        return (
+            patch("hefest.services.event.in_transaction", _mock_tx()),
+            patch.object(svc.Event, "filter", return_value=_event_qs(get=evt)),
+            patch.object(
+                svc.Registration,
+                "filter",
+                return_value=_reg_list_qs(items=regs or []),
+            ),
+            patch.object(svc.NotificationJob, "bulk_create", new=AsyncMock()),
+        )
+
     async def test_draft_event_gets_cancelled(self) -> None:
         organizer = _user(UserRole.organizer)
         evt = _event(organizer_id=organizer.id, status=EventStatus.draft)
         evt.save = AsyncMock()
 
-        with patch.object(svc.Event, "get_or_none", new=AsyncMock(return_value=evt)):
+        p1, p2, p3, p4 = self._patches(evt)
+        with p1, p2, p3, p4:
             result = await svc.cancel_event(organizer, evt.id)
 
         assert result.status == EventStatus.cancelled
+        evt.save.assert_awaited_once()
 
     async def test_already_cancelled_is_idempotent(self) -> None:
         organizer = _user(UserRole.organizer)
         evt = _event(organizer_id=organizer.id, status=EventStatus.cancelled)
         evt.save = AsyncMock()
 
-        with patch.object(svc.Event, "get_or_none", new=AsyncMock(return_value=evt)):
+        bulk_create = AsyncMock()
+        p1, p2, p3, _ = self._patches(evt)
+        with (
+            p1,
+            p2,
+            p3,
+            patch.object(svc.NotificationJob, "bulk_create", new=bulk_create),
+        ):
             result = await svc.cancel_event(organizer, evt.id)
 
         assert result.status == EventStatus.cancelled
         evt.save.assert_not_awaited()
+        bulk_create.assert_not_awaited()
 
     async def test_wrong_owner_raises_404(self) -> None:
         organizer = _user(UserRole.organizer)
         evt = _event(organizer_id=uuid.uuid4(), status=EventStatus.published)
 
-        with patch.object(svc.Event, "get_or_none", new=AsyncMock(return_value=evt)):
-            with pytest.raises(HTTPException) as exc:
-                await svc.cancel_event(organizer, evt.id)
+        p1, p2, p3, p4 = self._patches(evt)
+        with p1, p2, p3, p4, pytest.raises(HTTPException) as exc:
+            await svc.cancel_event(organizer, evt.id)
+
+        assert exc.value.status_code == 404
+
+    async def test_not_found_raises_404(self) -> None:
+        organizer = _user(UserRole.organizer)
+
+        p1, p2, p3, p4 = self._patches(None)
+        with p1, p2, p3, p4, pytest.raises(HTTPException) as exc:
+            await svc.cancel_event(organizer, uuid.uuid4())
 
         assert exc.value.status_code == 404
 
@@ -217,11 +304,140 @@ class TestCancelEvent:
         )
         evt.save = AsyncMock()
 
-        with patch.object(svc.Event, "get_or_none", new=AsyncMock(return_value=evt)):
-            with pytest.raises(HTTPException) as exc:
-                await svc.cancel_event(organizer, evt.id)
+        p1, p2, p3, p4 = self._patches(evt)
+        with p1, p2, p3, p4, pytest.raises(HTTPException) as exc:
+            await svc.cancel_event(organizer, evt.id)
 
         assert exc.value.status_code == 409
+
+    async def test_fan_out_enqueues_confirmed_and_waitlisted(self) -> None:
+        """Cancelling an event enqueues one EventCancelled job per affected reg.
+
+        Confirmed and waitlisted registrations are included. Exclusion of
+        cancelled registrations is verified via the DB-filter assertion in
+        test_fan_out_excludes_cancelled_registrations.
+        """
+        organizer = _user(UserRole.organizer)
+        event_id = uuid.uuid4()
+        evt = _event(organizer_id=organizer.id, status=EventStatus.published)
+        evt.id = event_id
+        evt.save = AsyncMock()
+
+        regs = [
+            _reg(event_id=event_id, status=RegistrationStatus.confirmed),
+            _reg(event_id=event_id, status=RegistrationStatus.confirmed),
+            _reg(event_id=event_id, status=RegistrationStatus.waitlisted),
+        ]
+
+        bulk_create = AsyncMock()
+        with (
+            patch("hefest.services.event.in_transaction", _mock_tx()),
+            patch.object(svc.Event, "filter", return_value=_event_qs(get=evt)),
+            patch.object(
+                svc.Registration,
+                "filter",
+                return_value=_reg_list_qs(items=regs),
+            ),
+            patch.object(svc.NotificationJob, "bulk_create", new=bulk_create),
+        ):
+            result = await svc.cancel_event(organizer, event_id)
+
+        assert result.status == EventStatus.cancelled
+        bulk_create.assert_awaited_once()
+        jobs: list[Any] = bulk_create.call_args[0][0]
+        assert len(jobs) == 3
+
+        # Build independent source sets from the regs this test created so that
+        # a shared bug (e.g. using event_id instead of reg.id) cannot mask itself.
+        source_reg_ids = {str(r.id) for r in regs}
+        source_student_ids = {str(r.student_id) for r in regs}
+        for job in jobs:
+            assert job.event_type == "EventCancelled"
+            rid = job.payload["registration_id"]
+            assert rid in source_reg_ids
+            assert job.idempotency_key == f"{rid}:EventCancelled"
+            assert job.payload["student_id"] in source_student_ids
+            assert job.payload["event_id"] == str(event_id)
+            assert "occurred_at" in job.payload
+            assert "user_id" not in job.payload
+
+    async def test_fan_out_excludes_cancelled_registrations(self) -> None:
+        """The service queries only confirmed+waitlisted; cancelled regs are out.
+
+        Verifies the DB filter uses the correct status__in argument. Job field
+        content (idempotency_key, payload shape) is verified in
+        test_fan_out_enqueues_confirmed_and_waitlisted.
+        """
+        organizer = _user(UserRole.organizer)
+        event_id = uuid.uuid4()
+        evt = _event(organizer_id=organizer.id, status=EventStatus.published)
+        evt.id = event_id
+        evt.save = AsyncMock()
+
+        # Simulate the service returning only 2 active regs (cancelled already
+        # filtered at DB level); also have a cancelled reg that must NOT appear.
+        active_regs = [
+            _reg(event_id=event_id, status=RegistrationStatus.confirmed),
+            _reg(event_id=event_id, status=RegistrationStatus.waitlisted),
+        ]
+
+        bulk_create = AsyncMock()
+        reg_filter_mock = _reg_list_qs(items=active_regs)
+        reg_filter_spy = MagicMock(return_value=reg_filter_mock)
+        with (
+            patch("hefest.services.event.in_transaction", _mock_tx()),
+            patch.object(svc.Event, "filter", return_value=_event_qs(get=evt)),
+            patch.object(svc.Registration, "filter", reg_filter_spy),
+            patch.object(svc.NotificationJob, "bulk_create", new=bulk_create),
+        ):
+            await svc.cancel_event(organizer, event_id)
+
+        # Verify the filter was called with the correct statuses.
+        call_kwargs = reg_filter_spy.call_args[1]
+        assert set(call_kwargs["status__in"]) == {
+            RegistrationStatus.confirmed,
+            RegistrationStatus.waitlisted,
+        }
+        # Exactly 2 jobs — the cancelled reg was excluded by the DB filter.
+        jobs = bulk_create.call_args[0][0]
+        assert len(jobs) == 2
+
+    async def test_fan_out_no_jobs_when_no_registrations(self) -> None:
+        """Cancelling an event with zero active registrations skips bulk_create."""
+        organizer = _user(UserRole.organizer)
+        evt = _event(organizer_id=organizer.id, status=EventStatus.published)
+        evt.save = AsyncMock()
+
+        bulk_create = AsyncMock()
+        with (
+            patch("hefest.services.event.in_transaction", _mock_tx()),
+            patch.object(svc.Event, "filter", return_value=_event_qs(get=evt)),
+            patch.object(
+                svc.Registration, "filter", return_value=_reg_list_qs(items=[])
+            ),
+            patch.object(svc.NotificationJob, "bulk_create", new=bulk_create),
+        ):
+            await svc.cancel_event(organizer, evt.id)
+
+        bulk_create.assert_not_awaited()
+
+    async def test_already_cancelled_enqueues_zero_jobs(self) -> None:
+        """Re-cancelling an already-cancelled event enqueues no new jobs."""
+        organizer = _user(UserRole.organizer)
+        evt = _event(organizer_id=organizer.id, status=EventStatus.cancelled)
+        evt.save = AsyncMock()
+
+        bulk_create = AsyncMock()
+        with (
+            patch("hefest.services.event.in_transaction", _mock_tx()),
+            patch.object(svc.Event, "filter", return_value=_event_qs(get=evt)),
+            patch.object(svc.Registration, "filter", return_value=_reg_list_qs()),
+            patch.object(svc.NotificationJob, "bulk_create", new=bulk_create),
+        ):
+            result = await svc.cancel_event(organizer, evt.id)
+
+        assert result.status == EventStatus.cancelled
+        bulk_create.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

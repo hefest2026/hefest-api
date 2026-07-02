@@ -13,7 +13,7 @@ from tortoise.transactions import in_transaction
 
 from hefest.config import settings
 from hefest.models.oauth_identity import OAuthIdentity
-from hefest.models.refresh_token import RefreshToken
+from hefest.models.refresh_token import RefreshClient, RefreshToken
 from hefest.models.user import User, UserRole
 
 if TYPE_CHECKING:
@@ -85,6 +85,25 @@ def create_email_verify_token(user: User) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
+def build_email_verify_link(user: User) -> str:
+    """Build the full verification link to embed in a verification email.
+
+    Mints a fresh stateless verification JWT for ``user`` and appends it to the
+    configured ``email_verify_url`` as a ``token`` query parameter. Because the
+    token is stateless, the delivery worker can call this at send time without
+    any shared state with the API process that created the account.
+
+    Args:
+        user: The User the verification link is for.
+
+    Returns:
+        An absolute URL such as ``https://app/verify-email?token=<jwt>``.
+    """
+    token = create_email_verify_token(user)
+    separator = "&" if "?" in settings.email_verify_url else "?"
+    return f"{settings.email_verify_url}{separator}token={token}"
+
+
 async def consume_email_verify_token(token: str) -> User:
     """Decode and consume an email verification token; set email_verified_at.
 
@@ -138,11 +157,15 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-async def issue_refresh_token(user: User) -> str:
+async def issue_refresh_token(
+    user: User, client: RefreshClient = RefreshClient.web
+) -> str:
     """Create and persist a new opaque refresh token; return the raw token.
 
     Args:
         user: The User instance to issue a token for.
+        client: The client the token is bound to; fixes how it is later
+            delivered on rotation (cookie for ``web``, body for ``mobile``).
 
     Returns:
         The raw (unhashed) refresh token string.
@@ -152,6 +175,7 @@ async def issue_refresh_token(user: User) -> str:
     await RefreshToken.create(
         user=user,
         token_hash=_hash_token(raw),
+        client=client,
         expires_at=expires_at,
     )
     return raw
@@ -162,17 +186,23 @@ async def issue_refresh_token(user: User) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def rotate_refresh_token(raw_token: str) -> tuple[str, str]:
-    """Rotate a refresh token. Returns (new_access_token, new_raw_refresh_token).
+async def rotate_refresh_token(
+    raw_token: str, presented_client: RefreshClient
+) -> tuple[str, str, RefreshClient]:
+    """Rotate a refresh token, preserving its bound client.
 
     Args:
         raw_token: The raw (unhashed) refresh token from the client.
+        presented_client: The client making the request (from ``X-Client-Id``).
+            Must match the client the token was issued to; this stops a
+            cookie-bound ``web`` token from being rotated into a ``mobile``
+            body response (and vice-versa).
 
     Returns:
-        A tuple of (new_access_token, new_raw_refresh_token).
+        A tuple of (new_access_token, new_raw_refresh_token, bound_client).
 
     Raises:
-        ValueError: On invalid or expired token.
+        ValueError: On invalid, expired, or client-mismatched token.
         PermissionError: On reuse detection (revokes whole family).
     """
     token_hash = _hash_token(raw_token)
@@ -200,15 +230,19 @@ async def rotate_refresh_token(raw_token: str) -> tuple[str, str]:
             ).update(revoked_at=now)
             raise PermissionError("token_reuse_detected")
 
-        # valid — rotate: revoke old, issue new pair
+        if record.client != presented_client:
+            # delivery channel is bound at issuance — refuse cross-client use
+            raise ValueError("client mismatch")
+
+        # valid — rotate: revoke old, issue new pair bound to the same client
         record.revoked_at = now
         await record.save(update_fields=["revoked_at"])
 
         user = await User.get(id=record.user_id)  # ty: ignore[unresolved-attribute]
         new_access = create_access_token(user)
-        new_refresh = await issue_refresh_token(user)
+        new_refresh = await issue_refresh_token(user, client=record.client)
 
-    return new_access, new_refresh
+    return new_access, new_refresh, record.client
 
 
 # ---------------------------------------------------------------------------

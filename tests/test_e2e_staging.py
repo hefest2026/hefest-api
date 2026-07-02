@@ -19,6 +19,8 @@ suite can be re-run immediately without waiting for the window to expire.
 from __future__ import annotations
 
 import os
+import re
+import time
 import uuid
 from collections.abc import Generator
 
@@ -26,6 +28,10 @@ import httpx
 import pytest
 
 BASE = os.environ.get("HEFEST_STAGING_URL", "").rstrip("/")
+# Mailpit HTTP API base; set only where a mail catcher is reachable (local
+# compose / CI e2e job). Absent against real staging (Resend), so the
+# email-delivery test below skips there.
+MAILPIT = os.environ.get("HEFEST_MAILPIT_URL", "").rstrip("/")
 HEADERS = {"User-Agent": "hefest-e2e/1.0", "Accept": "application/json"}
 
 pytestmark = pytest.mark.skipif(
@@ -206,6 +212,76 @@ class TestVerifyEmail:
 
     def test_verify_expires_in_is_900(self, verified_user: dict[str, str]) -> None:
         assert verified_user["expires_in"] == "900"
+
+
+# ---------------------------------------------------------------------------
+# Email delivery — proves the outbox worker actually sends the verification
+# email. Requires a reachable mail catcher (mailpit); skipped otherwise.
+# ---------------------------------------------------------------------------
+
+
+def _wait_for_verification_email(to: str, timeout: float = 30.0) -> str:
+    """Poll mailpit until a message addressed to ``to`` arrives; return its body.
+
+    Args:
+        to: Recipient address to search for.
+        timeout: Max seconds to wait for the asynchronously-delivered email.
+
+    Returns:
+        The plain-text body of the first matching message.
+
+    Raises:
+        AssertionError: If no matching email arrives before ``timeout``.
+    """
+    deadline = time.monotonic() + timeout
+    with httpx.Client(base_url=MAILPIT, timeout=10) as mc:
+        while time.monotonic() < deadline:
+            search = mc.get("/api/v1/search", params={"query": f"to:{to}"})
+            if search.status_code == 200:
+                messages = search.json().get("messages", [])
+                if messages:
+                    detail = mc.get(f"/api/v1/message/{messages[0]['ID']}")
+                    detail.raise_for_status()
+                    return detail.json().get("Text", "")
+            time.sleep(1.0)
+    raise AssertionError(f"no verification email for {to} within {timeout:.0f}s")
+
+
+@pytest.mark.skipif(
+    not MAILPIT,
+    reason="HEFEST_MAILPIT_URL not set — no mail catcher to assert delivery",
+)
+class TestEmailDelivery:
+    def test_verification_email_delivered_and_link_verifies(
+        self, client: httpx.Client
+    ) -> None:
+        """register -> worker delivers the email -> its link verifies the account."""
+        # Defensive flush so this extra registration never trips the 5/hour
+        # register limit depending on suite ordering.
+        client.delete("/internal/flush-ratelimit")
+
+        email = f"e2e-mail-{uuid.uuid4().hex[:8]}@example.com"
+        reg = _register(client, email)
+        assert reg.status_code == 201, f"register failed: {reg.text}"
+
+        body = _wait_for_verification_email(email)
+        assert "verify" in body.lower()
+
+        match = re.search(r"token=([A-Za-z0-9._-]+)", body)
+        assert match, f"no verify token in delivered email body: {body!r}"
+        emailed_token = match.group(1)
+
+        # The token the user actually RECEIVED (not the dev-mode response token)
+        # must verify the account end-to-end.
+        verify = client.post("/auth/verify-email", json={"token": emailed_token})
+        assert verify.status_code == 200, (
+            f"verify with emailed token failed: {verify.text}"
+        )
+
+        login = _login(client, email, "StrongPass123!")
+        assert login.status_code == 200, (
+            f"login after email verify failed: {login.text}"
+        )
 
 
 # ---------------------------------------------------------------------------
