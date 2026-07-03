@@ -317,13 +317,17 @@ async def list_event_registrations(
 
     # Single JOIN onto the user table (via ``values``) resolves each student's
     # name/email without an N+1 query per registration.
-    rows = await qs.offset(offset).limit(limit).values(
-        "id",
-        "student_id",
-        "status",
-        "registered_at",
-        "student__full_name",
-        "student__email",
+    rows = (
+        await qs.offset(offset)
+        .limit(limit)
+        .values(
+            "id",
+            "student_id",
+            "status",
+            "registered_at",
+            "student__full_name",
+            "student__email",
+        )
     )
     return [
         RegistrationSummary(
