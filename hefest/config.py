@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     refresh_cookie_name: str = "hefest_refresh"
     refresh_cookie_secure: bool = True
     frontend_oauth_success_url: str = ""
+    # Deeplink the OAuth callback redirects native app clients to. Fixed and
+    # server-controlled (never taken from the request) to avoid open redirects;
+    # the client only selects web vs mobile, not an arbitrary target.
+    mobile_oauth_success_url: str = "hefestmobile://auth/callback"
     cors_origins: list[str] = []
 
     # OAuth fields
@@ -106,6 +110,13 @@ class Settings(BaseSettings):
     worker_heartbeat_interval (90), which itself is well under
     worker_reaper_idle_seconds (300), so a hung send is never mistaken for a
     healthy lease."""
+
+    # Expo push notifications (HEF-43) — best-effort side channel, see pusher.py.
+    expo_push_url: str = "https://exp.host/--/api/v2/push/send"
+    expo_access_token: str = ""
+    """Optional Expo access token (enhanced security); sent as a Bearer header
+    when set."""
+    expo_push_timeout: int = 10
 
     # trusted reverse proxies (ProxyHeadersMiddleware uses this list)
     # set to the nginx container IP or CIDR in production

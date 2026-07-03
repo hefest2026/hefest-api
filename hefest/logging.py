@@ -68,7 +68,7 @@ def configure_logging(settings: Settings) -> None:
 
     if not is_dev:
         logger.add(
-            "logs/hefest.log",
+            "/tmp/hefest-logs/hefest.log",  # Changed from relative "logs/..."
             level=settings.log_level,
             format=_PROD_FORMAT,
             rotation="00:00",

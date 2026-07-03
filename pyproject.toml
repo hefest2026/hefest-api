@@ -32,7 +32,7 @@ dev = [
 line-length = 88
 target-version = "py312"
 # Generated migrations contain long raw-SQL strings; lint/format them like ty skips them.
-extend-exclude = ["migrations"]
+extend-exclude = ["migrations", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]

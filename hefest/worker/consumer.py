@@ -47,7 +47,7 @@ from tortoise.transactions import in_transaction
 
 from hefest.config import settings
 from hefest.services import auth as auth_svc
-from hefest.worker import recipients, templates
+from hefest.worker import push_templates, recipients, templates
 from hefest.worker.claim import (
     backoff_delay,
     claim_batch,
@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from hefest.worker.claim import ClaimedJob
     from hefest.worker.heartbeat import Heartbeat
     from hefest.worker.mailer import Mailer
+    from hefest.worker.pusher import Pusher
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +184,39 @@ async def _commit_finalizer(
     raise AssertionError("unreachable")  # loop always returns or raises
 
 
-async def _process_one(job: ClaimedJob, worker_id: str, mailer: Mailer) -> None:
+async def _send_push(
+    job: ClaimedJob, recipient: recipients.Recipient, pusher: Pusher
+) -> None:
+    """Best-effort Expo push alongside the email (HEF-43); never raises.
+
+    Skipped for account-scoped jobs (``EmailVerify`` has no ``event``, and
+    precedes device registration in the mobile app's own sign-in flow, so it
+    never has a push audience). Any failure — rendering, token lookup, or the
+    send itself — is logged and swallowed: push is not part of the job's
+    at-least-once contract, so it must never turn into an email resend.
+
+    Args:
+        job: The claimed job (for ``event_type``/``payload``).
+        recipient: The already-loaded recipient (user + optional event).
+        pusher: The Expo push sender.
+    """
+    if recipient.event is None:
+        return
+    try:
+        tokens = await recipients.load_push_tokens(recipient.user)
+        if not tokens:
+            return
+        content = push_templates.render(job.event_type, recipient.event, job.payload)
+        await pusher.send_to_tokens(
+            tokens, content, {"event_id": str(recipient.event.id)}
+        )
+    except Exception:
+        logger.exception("Best-effort push send failed for job %s", job.id)
+
+
+async def _process_one(
+    job: ClaimedJob, worker_id: str, mailer: Mailer, pusher: Pusher
+) -> None:
     """Process one claimed job through the per-job decision matrix (spec §4).
 
     Loads the recipient, renders the email, and sends it. The send happens with
@@ -195,6 +228,10 @@ async def _process_one(job: ClaimedJob, worker_id: str, mailer: Mailer) -> None:
     * ``TransientError`` with attempts exhausted → ``mark_failed``
     * ``TransientError`` otherwise → ``mark_retry`` with exponential backoff
 
+    A best-effort Expo push (HEF-43) is attempted once the email has sent
+    successfully; it never affects the job's outcome (see
+    ``_send_push_best_effort``).
+
     ``asyncio.CancelledError`` and any non-worker exception propagate — only
     ``TransientError``/``PermanentError`` are handled here, so a programming
     error is never silently turned into a retry.
@@ -203,6 +240,7 @@ async def _process_one(job: ClaimedJob, worker_id: str, mailer: Mailer) -> None:
         job: The claimed job to deliver.
         worker_id: This worker's fencing token.
         mailer: The kept-alive SMTP mailer.
+        pusher: The Expo push sender.
     """
     try:
         recipient = await recipients.load(job.payload)
@@ -233,11 +271,17 @@ async def _process_one(job: ClaimedJob, worker_id: str, mailer: Mailer) -> None:
                 mark_retry, job, worker_id, last_error=str(exc), delay_seconds=delay
             )
         return
+
+    await _send_push(job, recipient, pusher)
     await _finalize(mark_completed, job, worker_id)
 
 
 async def _bounded_process(
-    semaphore: asyncio.Semaphore, job: ClaimedJob, worker_id: str, mailer: Mailer
+    semaphore: asyncio.Semaphore,
+    job: ClaimedJob,
+    worker_id: str,
+    mailer: Mailer,
+    pusher: Pusher,
 ) -> None:
     """Process one job while holding a send-concurrency slot.
 
@@ -247,13 +291,18 @@ async def _bounded_process(
         job: The claimed job to deliver.
         worker_id: This worker's fencing token.
         mailer: The kept-alive SMTP mailer.
+        pusher: The Expo push sender.
     """
     async with semaphore:
-        await _process_one(job, worker_id, mailer)
+        await _process_one(job, worker_id, mailer, pusher)
 
 
 async def _drain(
-    worker_id: str, mailer: Mailer, heartbeat: Heartbeat, stop: asyncio.Event
+    worker_id: str,
+    mailer: Mailer,
+    pusher: Pusher,
+    heartbeat: Heartbeat,
+    stop: asyncio.Event,
 ) -> None:
     """Drain the outbox to empty: one reaper pass, then claim → process (spec §4).
 
@@ -268,6 +317,7 @@ async def _drain(
     Args:
         worker_id: This worker's fencing token.
         mailer: The kept-alive SMTP mailer.
+        pusher: The Expo push sender.
         heartbeat: The lease heartbeat; its ``lease_lost`` event halts claiming.
         stop: Shutdown signal; halts claiming when set.
     """
@@ -313,7 +363,9 @@ async def _drain(
         # never reach here (they are handled inside _process_one).
         async with asyncio.TaskGroup() as tg:
             for job in jobs:
-                tg.create_task(_bounded_process(semaphore, job, worker_id, mailer))
+                tg.create_task(
+                    _bounded_process(semaphore, job, worker_id, mailer, pusher)
+                )
 
         # Yield so a saturated queue never starves the heartbeat task (spec §6.2).
         await asyncio.sleep(0)
@@ -368,7 +420,11 @@ async def _listen(wake: asyncio.Event) -> None:
 
 
 async def run(
-    worker_id: str, mailer: Mailer, heartbeat: Heartbeat, stop: asyncio.Event
+    worker_id: str,
+    mailer: Mailer,
+    pusher: Pusher,
+    heartbeat: Heartbeat,
+    stop: asyncio.Event,
 ) -> None:
     """Consume the outbox until shutdown: LISTEN/NOTIFY + fallback poll (spec §4).
 
@@ -377,11 +433,12 @@ async def run(
     ``settings.worker_fallback_poll_interval`` — either trigger drives another
     drain. Exits the loop once ``stop`` or ``heartbeat.lease_lost`` is set, and
     always tears down its LISTEN task. ``__main__`` constructs and owns
-    ``mailer``, ``heartbeat``, and ``stop``.
+    ``mailer``, ``pusher``, ``heartbeat``, and ``stop``.
 
     Args:
         worker_id: This worker's fencing token (``host:uuid``).
         mailer: The kept-alive SMTP mailer.
+        pusher: The Expo push sender.
         heartbeat: The lease heartbeat; ``lease_lost`` ends consumption.
         stop: Shutdown signal set by ``__main__``'s signal handlers.
     """
@@ -394,7 +451,7 @@ async def run(
             # the event so the wait below returns immediately and drains again,
             # rather than the signal being lost between drain and clear.
             wake.clear()
-            await _drain(worker_id, mailer, heartbeat, stop)
+            await _drain(worker_id, mailer, pusher, heartbeat, stop)
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(wake.wait(), interval)
     finally:

@@ -37,10 +37,17 @@ class MyRegistrationResponse(BaseModel):
 
 
 class RegistrationSummary(BaseModel):
-    """Entry in organizer-facing confirmed / waitlist lists."""
+    """Entry in organizer-facing confirmed / waitlist lists.
+
+    Carries the student's display name and email so organizers can see *who*
+    is registered without a second round-trip. The identity is resolved
+    server-side from ``student_id`` (never trusted from the client).
+    """
 
     id: UUID
     student_id: UUID
+    student_name: str
+    student_email: str
     status: RegistrationStatus
     registered_at: datetime
 

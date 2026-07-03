@@ -20,6 +20,7 @@ import asyncio
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -94,13 +95,21 @@ def finalizers(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]:
 
 @pytest.fixture
 def recipient_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch recipients.load + templates.render to succeed."""
+    """Patch recipients.load + templates.render to succeed.
+
+    No push tokens by default, so ``_send_push`` returns early without
+    touching ``pusher`` — tests that only care about the email decision
+    matrix don't need to also stub push rendering/sending.
+    """
     recipient = _Recipient(user=_User(email="a@b.c"), event=object())
     monkeypatch.setattr(consumer.recipients, "load", AsyncMock(return_value=recipient))
     monkeypatch.setattr(
         consumer.templates,
         "render",
         lambda *_args, **_kw: EmailContent(subject="s", body="b"),
+    )
+    monkeypatch.setattr(
+        consumer.recipients, "load_push_tokens", AsyncMock(return_value=[])
     )
 
 
@@ -113,7 +122,7 @@ async def test_success_marks_completed(
     job = _job()
     mailer = AsyncMock()
 
-    await consumer._process_one(job, WORKER_ID, mailer)
+    await consumer._process_one(job, WORKER_ID, mailer, AsyncMock())
 
     mailer.send.assert_awaited_once()
     finalizers["mark_completed"].assert_awaited_once()
@@ -122,6 +131,70 @@ async def test_success_marks_completed(
     assert completed_call is not None
     assert completed_call.args[1:] == (job.id, WORKER_ID)
     assert completed_call.kwargs == {}
+    finalizers["mark_retry"].assert_not_awaited()
+    finalizers["mark_failed"].assert_not_awaited()
+
+
+async def test_success_sends_push_to_registered_tokens(
+    finalizers: dict[str, AsyncMock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful send with registered devices also pushes (HEF-43)."""
+    event = SimpleNamespace(id="e1")
+    recipient = _Recipient(user=_User(email="a@b.c"), event=event)
+    monkeypatch.setattr(consumer.recipients, "load", AsyncMock(return_value=recipient))
+    monkeypatch.setattr(
+        consumer.templates,
+        "render",
+        lambda *_args, **_kw: EmailContent(subject="s", body="b"),
+    )
+    monkeypatch.setattr(
+        consumer.recipients,
+        "load_push_tokens",
+        AsyncMock(return_value=["ExponentPushToken[a]", "ExponentPushToken[b]"]),
+    )
+    push_content = object()
+    monkeypatch.setattr(
+        consumer.push_templates, "render", lambda *_a, **_kw: push_content
+    )
+    job = _job()
+    mailer = AsyncMock()
+    pusher = AsyncMock()
+
+    await consumer._process_one(job, WORKER_ID, mailer, pusher)
+
+    pusher.send_to_tokens.assert_awaited_once_with(
+        ["ExponentPushToken[a]", "ExponentPushToken[b]"],
+        push_content,
+        {"event_id": "e1"},
+    )
+    finalizers["mark_completed"].assert_awaited_once()
+
+
+async def test_push_failure_does_not_affect_job_outcome(
+    finalizers: dict[str, AsyncMock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken pusher must not fail/retry the job — email already succeeded."""
+    recipient = _Recipient(user=_User(email="a@b.c"), event=SimpleNamespace(id="e1"))
+    monkeypatch.setattr(consumer.recipients, "load", AsyncMock(return_value=recipient))
+    monkeypatch.setattr(
+        consumer.templates,
+        "render",
+        lambda *_args, **_kw: EmailContent(subject="s", body="b"),
+    )
+    monkeypatch.setattr(
+        consumer.recipients,
+        "load_push_tokens",
+        AsyncMock(return_value=["ExponentPushToken[a]"]),
+    )
+    monkeypatch.setattr(consumer.push_templates, "render", lambda *_a, **_kw: object())
+    job = _job()
+    mailer = AsyncMock()
+    pusher = AsyncMock()
+    pusher.send_to_tokens.side_effect = RuntimeError("expo is down")
+
+    await consumer._process_one(job, WORKER_ID, mailer, pusher)
+
+    finalizers["mark_completed"].assert_awaited_once()
     finalizers["mark_retry"].assert_not_awaited()
     finalizers["mark_failed"].assert_not_awaited()
 
@@ -137,7 +210,7 @@ async def test_recipient_not_found_marks_failed(
     job = _job()
     mailer = AsyncMock()
 
-    await consumer._process_one(job, WORKER_ID, mailer)
+    await consumer._process_one(job, WORKER_ID, mailer, AsyncMock())
 
     mailer.send.assert_not_awaited()
     finalizers["mark_failed"].assert_awaited_once()
@@ -161,7 +234,7 @@ async def test_permanent_render_error_marks_failed(
     job = _job()
     mailer = AsyncMock()
 
-    await consumer._process_one(job, WORKER_ID, mailer)
+    await consumer._process_one(job, WORKER_ID, mailer, AsyncMock())
 
     mailer.send.assert_not_awaited()
     finalizers["mark_failed"].assert_awaited_once()
@@ -174,7 +247,7 @@ async def test_permanent_send_error_marks_failed(
     mailer = AsyncMock()
     mailer.send.side_effect = PermanentSendError("5xx")
 
-    await consumer._process_one(job, WORKER_ID, mailer)
+    await consumer._process_one(job, WORKER_ID, mailer, AsyncMock())
 
     finalizers["mark_failed"].assert_awaited_once()
     finalizers["mark_retry"].assert_not_awaited()
@@ -188,7 +261,7 @@ async def test_transient_under_cap_marks_retry_with_backoff(
     mailer = AsyncMock()
     mailer.send.side_effect = TransientSendError("timeout")
 
-    await consumer._process_one(job, WORKER_ID, mailer)
+    await consumer._process_one(job, WORKER_ID, mailer, AsyncMock())
 
     finalizers["mark_retry"].assert_awaited_once()
     # attempts=1, base=30 -> 30 (spec §5 exponential backoff base 4).
@@ -206,7 +279,7 @@ async def test_transient_at_cap_marks_failed(
     mailer = AsyncMock()
     mailer.send.side_effect = TransientSendError("timeout")
 
-    await consumer._process_one(job, WORKER_ID, mailer)
+    await consumer._process_one(job, WORKER_ID, mailer, AsyncMock())
 
     finalizers["mark_failed"].assert_awaited_once()
     finalizers["mark_retry"].assert_not_awaited()
@@ -222,7 +295,7 @@ async def test_lease_lost_finalizer_discards_no_resend(
     job = _job()
     mailer = AsyncMock()
 
-    await consumer._process_one(job, WORKER_ID, mailer)
+    await consumer._process_one(job, WORKER_ID, mailer, AsyncMock())
 
     # Sent exactly once; no resend, no crash despite the lost lease.
     mailer.send.assert_awaited_once()
@@ -239,7 +312,7 @@ async def test_unexpected_error_propagates(
     mailer = AsyncMock()
 
     with pytest.raises(RuntimeError, match="bug"):
-        await consumer._process_one(_job(), WORKER_ID, mailer)
+        await consumer._process_one(_job(), WORKER_ID, mailer, AsyncMock())
 
     finalizers["mark_failed"].assert_not_awaited()
     finalizers["mark_retry"].assert_not_awaited()
@@ -316,7 +389,7 @@ async def test_drain_reaper_runs_once_per_wake(
     monkeypatch.setattr(consumer, "claim_batch", claim)
     monkeypatch.setattr(consumer, "in_transaction", _fake_in_transaction(object()))
 
-    await consumer._drain(WORKER_ID, AsyncMock(), _heartbeat_stub(), asyncio.Event())
+    await consumer._drain(WORKER_ID, AsyncMock(), AsyncMock(), _heartbeat_stub(), asyncio.Event())
 
     reap.assert_awaited_once()
     claim.assert_awaited_once()
@@ -333,7 +406,7 @@ async def test_drain_reaper_loops_until_short_batch(
     monkeypatch.setattr(consumer, "claim_batch", AsyncMock(return_value=[]))
     monkeypatch.setattr(consumer, "in_transaction", _fake_in_transaction(object()))
 
-    await consumer._drain(WORKER_ID, AsyncMock(), _heartbeat_stub(), asyncio.Event())
+    await consumer._drain(WORKER_ID, AsyncMock(), AsyncMock(), _heartbeat_stub(), asyncio.Event())
 
     assert reap.await_count == 3
     # batch_size is threaded through to the query (third positional arg).
@@ -361,7 +434,7 @@ async def test_drain_loops_on_full_batch_stops_on_short(
 
     monkeypatch.setattr(consumer.asyncio, "sleep", fake_sleep)
 
-    await consumer._drain(WORKER_ID, AsyncMock(), _heartbeat_stub(), asyncio.Event())
+    await consumer._drain(WORKER_ID, AsyncMock(), AsyncMock(), _heartbeat_stub(), asyncio.Event())
 
     assert claim.await_count == 2
     assert cast(AsyncMock, consumer._process_one).await_count == 3
@@ -379,7 +452,7 @@ async def test_drain_stops_when_lease_lost(
     hb = _heartbeat_stub()
     hb.lease_lost.set()
 
-    await consumer._drain(WORKER_ID, AsyncMock(), hb, asyncio.Event())
+    await consumer._drain(WORKER_ID, AsyncMock(), AsyncMock(), hb, asyncio.Event())
 
     # Lease lost before the loop body -> reaper ran, but no work was claimed.
     claim.assert_not_awaited()
@@ -410,7 +483,7 @@ async def test_drain_respects_concurrency_cap(
 
     monkeypatch.setattr(consumer, "_process_one", instrumented)
 
-    await consumer._drain(WORKER_ID, AsyncMock(), _heartbeat_stub(), asyncio.Event())
+    await consumer._drain(WORKER_ID, AsyncMock(), AsyncMock(), _heartbeat_stub(), asyncio.Event())
 
     assert peak <= 3
 

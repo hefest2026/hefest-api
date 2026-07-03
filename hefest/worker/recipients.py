@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from hefest.models.device import Device
 from hefest.models.event import Event
 from hefest.models.user import User
 from hefest.worker.errors import RecipientNotFound
@@ -67,3 +68,16 @@ async def load(payload: dict[str, Any]) -> Recipient:
         raise RecipientNotFound(f"event {event_id!r} not found")
 
     return Recipient(user=user, event=event)
+
+
+async def load_push_tokens(user: User) -> list[str]:
+    """Fetch every Expo push token currently registered for ``user``.
+
+    Args:
+        user: The notification recipient.
+
+    Returns:
+        The user's registered Expo push tokens (empty if none/no devices).
+    """
+    devices = await Device.filter(user=user).only("expo_push_token")
+    return [device.expo_push_token for device in devices]
