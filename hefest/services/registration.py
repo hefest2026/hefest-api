@@ -311,8 +311,28 @@ async def list_event_registrations(
         RegistrationStatus.waitlisted if waitlist_only else RegistrationStatus.confirmed
     )
     qs = Registration.filter(event_id=event_id, status=filter_status)
-    if waitlist_only:
-        qs = qs.order_by("registered_at", "id")
+    # Waitlist is FIFO; the confirmed list is also returned oldest-first so the
+    # organizer sees a stable, deterministic order.
+    qs = qs.order_by("registered_at", "id")
 
-    regs = await qs.offset(offset).limit(limit)
-    return [RegistrationSummary.model_validate(r) for r in regs]
+    # Single JOIN onto the user table (via ``values``) resolves each student's
+    # name/email without an N+1 query per registration.
+    rows = await qs.offset(offset).limit(limit).values(
+        "id",
+        "student_id",
+        "status",
+        "registered_at",
+        "student__full_name",
+        "student__email",
+    )
+    return [
+        RegistrationSummary(
+            id=row["id"],
+            student_id=row["student_id"],
+            student_name=row["student__full_name"],
+            student_email=row["student__email"],
+            status=row["status"],
+            registered_at=row["registered_at"],
+        )
+        for row in rows
+    ]

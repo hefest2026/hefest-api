@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     refresh_cookie_name: str = "hefest_refresh"
     refresh_cookie_secure: bool = True
     frontend_oauth_success_url: str = ""
+    # Deeplink the OAuth callback redirects native app clients to. Fixed and
+    # server-controlled (never taken from the request) to avoid open redirects;
+    # the client only selects web vs mobile, not an arbitrary target.
+    mobile_oauth_success_url: str = "hefestmobile://auth/callback"
     cors_origins: list[str] = []
 
     # OAuth fields
