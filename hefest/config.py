@@ -111,6 +111,13 @@ class Settings(BaseSettings):
     worker_reaper_idle_seconds (300), so a hung send is never mistaken for a
     healthy lease."""
 
+    # Expo push notifications (HEF-43) — best-effort side channel, see pusher.py.
+    expo_push_url: str = "https://exp.host/--/api/v2/push/send"
+    expo_access_token: str = ""
+    """Optional Expo access token (enhanced security); sent as a Bearer header
+    when set."""
+    expo_push_timeout: int = 10
+
     # trusted reverse proxies (ProxyHeadersMiddleware uses this list)
     # set to the nginx container IP or CIDR in production
     trusted_proxies: list[str] = ["127.0.0.1", "::1"]

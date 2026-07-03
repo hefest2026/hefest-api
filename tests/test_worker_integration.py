@@ -111,6 +111,25 @@ class StubMailer:
         """No-op; no real connection to close."""
 
 
+class StubPusher:
+    """Recording no-op push sender.
+
+    These tests' users register no devices, so ``load_push_tokens`` returns
+    ``[]`` and ``_send_push`` returns before ever calling ``send_to_tokens``.
+    Sends are recorded rather than asserted-against so this double stays inert
+    (not a footgun) if a future test does register a device.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[list[str], object, dict[str, object]]] = []
+
+    async def send_to_tokens(
+        self, tokens: list[str], content: object, data: dict[str, object]
+    ) -> None:
+        """Record a push send."""
+        self.sent.append((tokens, content, data))
+
+
 class _StubHeartbeat:
     """Heartbeat stub whose ``lease_lost`` event is never set."""
 
@@ -273,12 +292,15 @@ async def test_happy_path_job_completes(db: Any) -> None:
 
     worker_id = f"inttest-worker:{uuid.uuid4()}"
     mailer = StubMailer()
+    pusher = StubPusher()
 
     claimed = await _claim_job_by_id(job.id, worker_id)
     assert claimed is not None, "job should be immediately claimable"
     assert claimed.attempts == 1
 
-    await consumer._process_one(claimed, worker_id, cast(Any, mailer))
+    await consumer._process_one(
+        claimed, worker_id, cast(Any, mailer), cast(Any, pusher)
+    )
 
     # Verify DB state — mirrors notification_jobs endpoint fields
     refreshed = await NotificationJob.get(id=job.id)
@@ -385,6 +407,7 @@ async def test_retry_backoff_then_failed_at_max_attempts(db: Any) -> None:
     max_attempts = settings.worker_max_attempts
     error = TransientSendError("simulated transient SMTP failure")
     mailer = StubMailer(error=error)
+    pusher = StubPusher()
 
     for attempt in range(1, max_attempts + 1):
         # Force the job to be immediately due
@@ -396,7 +419,9 @@ async def test_retry_backoff_then_failed_at_max_attempts(db: Any) -> None:
         assert claimed_job is not None, f"job not claimable on attempt {attempt}"
         assert claimed_job.attempts == attempt
 
-        await consumer._process_one(claimed_job, worker_id, cast(Any, mailer))
+        await consumer._process_one(
+            claimed_job, worker_id, cast(Any, mailer), cast(Any, pusher)
+        )
 
         row = await NotificationJob.get(id=job.id)
 
@@ -517,11 +542,14 @@ async def test_event_cancelled_fanout_and_drain_delivers_all(db: Any) -> None:
     # Claim and process each test-owned job individually
     worker_id = f"inttest-worker:{uuid.uuid4()}"
     mailer = StubMailer()
+    pusher = StubPusher()
 
     for job in jobs:
         claimed = await _claim_job_by_id(job.id, worker_id)
         assert claimed is not None, f"EventCancelled job {job.id} not claimable"
-        await consumer._process_one(claimed, worker_id, cast(Any, mailer))
+        await consumer._process_one(
+            claimed, worker_id, cast(Any, mailer), cast(Any, pusher)
+        )
 
     # All K jobs must be completed
     completed_jobs = await NotificationJob.filter(

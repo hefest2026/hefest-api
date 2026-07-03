@@ -2,8 +2,9 @@
 
 Owns the worker's lifecycle and wiring (spec §6): initialise logging and the
 worker's own (larger) Tortoise pool, mint a unique ``host:uuid`` fencing token,
-construct the mailer and heartbeat, and run the heartbeat and consumer as
-concurrent tasks until any of them finishes or a shutdown signal arrives.
+construct the mailer, pusher (HEF-43), and heartbeat, and run the heartbeat
+and consumer as concurrent tasks until any of them finishes or a shutdown
+signal arrives.
 
 Shutdown contract
 -----------------
@@ -31,6 +32,7 @@ from hefest.logging import configure_logging
 from hefest.worker import consumer
 from hefest.worker.heartbeat import Heartbeat
 from hefest.worker.mailer import Mailer
+from hefest.worker.pusher import Pusher
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,7 @@ async def _run() -> None:
 
     worker_id = f"{socket.gethostname()}:{uuid.uuid4()}"
     mailer = Mailer(settings)
+    pusher = Pusher(settings)
     heartbeat = Heartbeat(
         worker_id,
         interval=settings.worker_heartbeat_interval,
@@ -60,7 +63,7 @@ async def _run() -> None:
 
     heartbeat_task = asyncio.create_task(heartbeat.run())
     consumer_task = asyncio.create_task(
-        consumer.run(worker_id, mailer, heartbeat, stop)
+        consumer.run(worker_id, mailer, pusher, heartbeat, stop)
     )
     stop_waiter = asyncio.create_task(stop.wait())
     lease_waiter = asyncio.create_task(heartbeat.lease_lost.wait())
@@ -77,6 +80,7 @@ async def _run() -> None:
             task.cancel()
         await asyncio.gather(*waiters, return_exceptions=True)
         await mailer.aclose()
+        await pusher.aclose()
         await Tortoise.close_connections()
 
     if lease_lost:
