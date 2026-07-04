@@ -85,6 +85,18 @@ def render(
             ),
         )
 
+    if event_type == "Welcome":
+        # Account-scoped, like EmailVerify: no event to dereference.
+        return EmailContent(
+            subject="Welcome to Hefest",
+            body=(
+                f"Hi {user.full_name},\n\n"
+                "Your email is verified and your Hefest account is ready.\n\n"
+                "You can now browse school events and register for the ones you "
+                "want to attend."
+            ),
+        )
+
     # Every remaining type is event-scoped and dereferences the event.
     if event is None:
         raise PermanentError(
@@ -156,6 +168,19 @@ def render(
                     f"Scheduled for: {starts}\n"
                     f"Location: {event.location}\n\n"
                     "We apologise for any inconvenience."
+                ),
+            )
+
+        case "EventUpdated":
+            return EmailContent(
+                subject=f"{event.title} has been updated",
+                body=(
+                    f"Hi {user.full_name},\n\n"
+                    f"Some details for {event.title} have changed. Here are the "
+                    f"current details:\n\n"
+                    f"When: {starts}\n"
+                    f"Where: {event.location}\n\n"
+                    "Please review the updated information."
                 ),
             )
 

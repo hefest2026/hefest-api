@@ -15,6 +15,7 @@ import pytest
 from fastapi import HTTPException
 
 from hefest.models.event import EventStatus
+from hefest.models.notification import NotificationType
 from hefest.models.registration import RegistrationStatus
 from hefest.models.user import UserRole
 from hefest.schemas.event import EventCreateRequest, EventUpdateRequest
@@ -226,6 +227,15 @@ def _reg(
     return r
 
 
+def _event_update_qs(evt: Any) -> MagicMock:
+    """Mock Event.filter chain: .using_db().select_for_update().get_or_none()."""
+    qs = MagicMock()
+    qs.using_db.return_value = qs
+    qs.select_for_update.return_value = qs
+    qs.get_or_none = AsyncMock(return_value=evt)
+    return qs
+
+
 class TestCancelEvent:
     """Tests for cancel_event — covers status transitions and fan-out jobs."""
 
@@ -233,7 +243,7 @@ class TestCancelEvent:
         self,
         evt: Any,
         regs: list[Any] | None = None,
-    ) -> tuple[Any, Any, Any, Any]:
+    ) -> tuple[Any, Any, Any, Any, Any]:
         """Return context managers for the standard cancel_event mock set."""
         return (
             patch("hefest.services.event.in_transaction", _mock_tx()),
@@ -244,6 +254,7 @@ class TestCancelEvent:
                 return_value=_reg_list_qs(items=regs or []),
             ),
             patch.object(svc.NotificationJob, "bulk_create", new=AsyncMock()),
+            patch.object(svc.Notification, "bulk_create", new=AsyncMock()),
         )
 
     async def test_draft_event_gets_cancelled(self) -> None:
@@ -251,8 +262,8 @@ class TestCancelEvent:
         evt = _event(organizer_id=organizer.id, status=EventStatus.draft)
         evt.save = AsyncMock()
 
-        p1, p2, p3, p4 = self._patches(evt)
-        with p1, p2, p3, p4:
+        p1, p2, p3, p4, p5 = self._patches(evt)
+        with p1, p2, p3, p4, p5:
             result = await svc.cancel_event(organizer, evt.id)
 
         assert result.status == EventStatus.cancelled
@@ -263,26 +274,29 @@ class TestCancelEvent:
         evt = _event(organizer_id=organizer.id, status=EventStatus.cancelled)
         evt.save = AsyncMock()
 
-        bulk_create = AsyncMock()
-        p1, p2, p3, _ = self._patches(evt)
+        job_bulk = AsyncMock()
+        note_bulk = AsyncMock()
+        p1, p2, p3, _, _ = self._patches(evt)
         with (
             p1,
             p2,
             p3,
-            patch.object(svc.NotificationJob, "bulk_create", new=bulk_create),
+            patch.object(svc.NotificationJob, "bulk_create", new=job_bulk),
+            patch.object(svc.Notification, "bulk_create", new=note_bulk),
         ):
             result = await svc.cancel_event(organizer, evt.id)
 
         assert result.status == EventStatus.cancelled
         evt.save.assert_not_awaited()
-        bulk_create.assert_not_awaited()
+        job_bulk.assert_not_awaited()
+        note_bulk.assert_not_awaited()
 
     async def test_wrong_owner_raises_404(self) -> None:
         organizer = _user(UserRole.organizer)
         evt = _event(organizer_id=uuid.uuid4(), status=EventStatus.published)
 
-        p1, p2, p3, p4 = self._patches(evt)
-        with p1, p2, p3, p4, pytest.raises(HTTPException) as exc:
+        p1, p2, p3, p4, p5 = self._patches(evt)
+        with p1, p2, p3, p4, p5, pytest.raises(HTTPException) as exc:
             await svc.cancel_event(organizer, evt.id)
 
         assert exc.value.status_code == 404
@@ -290,8 +304,8 @@ class TestCancelEvent:
     async def test_not_found_raises_404(self) -> None:
         organizer = _user(UserRole.organizer)
 
-        p1, p2, p3, p4 = self._patches(None)
-        with p1, p2, p3, p4, pytest.raises(HTTPException) as exc:
+        p1, p2, p3, p4, p5 = self._patches(None)
+        with p1, p2, p3, p4, p5, pytest.raises(HTTPException) as exc:
             await svc.cancel_event(organizer, uuid.uuid4())
 
         assert exc.value.status_code == 404
@@ -304,14 +318,14 @@ class TestCancelEvent:
         )
         evt.save = AsyncMock()
 
-        p1, p2, p3, p4 = self._patches(evt)
-        with p1, p2, p3, p4, pytest.raises(HTTPException) as exc:
+        p1, p2, p3, p4, p5 = self._patches(evt)
+        with p1, p2, p3, p4, p5, pytest.raises(HTTPException) as exc:
             await svc.cancel_event(organizer, evt.id)
 
         assert exc.value.status_code == 409
 
     async def test_fan_out_enqueues_confirmed_and_waitlisted(self) -> None:
-        """Cancelling an event enqueues one EventCancelled job per affected reg.
+        """Cancelling enqueues one EventCancelled job AND notification per reg.
 
         Confirmed and waitlisted registrations are included. Exclusion of
         cancelled registrations is verified via the DB-filter assertion in
@@ -329,7 +343,8 @@ class TestCancelEvent:
             _reg(event_id=event_id, status=RegistrationStatus.waitlisted),
         ]
 
-        bulk_create = AsyncMock()
+        job_bulk = AsyncMock()
+        note_bulk = AsyncMock()
         with (
             patch("hefest.services.event.in_transaction", _mock_tx()),
             patch.object(svc.Event, "filter", return_value=_event_qs(get=evt)),
@@ -338,14 +353,18 @@ class TestCancelEvent:
                 "filter",
                 return_value=_reg_list_qs(items=regs),
             ),
-            patch.object(svc.NotificationJob, "bulk_create", new=bulk_create),
+            patch.object(svc.NotificationJob, "bulk_create", new=job_bulk),
+            patch.object(svc.Notification, "bulk_create", new=note_bulk),
         ):
             result = await svc.cancel_event(organizer, event_id)
 
         assert result.status == EventStatus.cancelled
-        bulk_create.assert_awaited_once()
-        jobs: list[Any] = bulk_create.call_args[0][0]
+        job_bulk.assert_awaited_once()
+        note_bulk.assert_awaited_once()
+        jobs: list[Any] = job_bulk.call_args[0][0]
+        notes: list[Any] = note_bulk.call_args[0][0]
         assert len(jobs) == 3
+        assert len(notes) == 3
 
         # Build independent source sets from the regs this test created so that
         # a shared bug (e.g. using event_id instead of reg.id) cannot mask itself.
@@ -360,6 +379,15 @@ class TestCancelEvent:
             assert job.payload["event_id"] == str(event_id)
             assert "occurred_at" in job.payload
             assert "user_id" not in job.payload
+
+        # Every notification mirrors a job: same type, recipient, and event.
+        # (FK ``_id`` attrs aren't exposed on unsaved instances, so the payload
+        # — which carries the same recipient/event — is the assertion surface.)
+        for note in notes:
+            assert note.notification_type == NotificationType.event_cancelled
+            assert note.payload["student_id"] in source_student_ids
+            assert note.payload["event_id"] == str(event_id)
+        assert {n.payload["student_id"] for n in notes} == source_student_ids
 
     async def test_fan_out_excludes_cancelled_registrations(self) -> None:
         """The service queries only confirmed+waitlisted; cancelled regs are out.
@@ -381,14 +409,16 @@ class TestCancelEvent:
             _reg(event_id=event_id, status=RegistrationStatus.waitlisted),
         ]
 
-        bulk_create = AsyncMock()
+        job_bulk = AsyncMock()
+        note_bulk = AsyncMock()
         reg_filter_mock = _reg_list_qs(items=active_regs)
         reg_filter_spy = MagicMock(return_value=reg_filter_mock)
         with (
             patch("hefest.services.event.in_transaction", _mock_tx()),
             patch.object(svc.Event, "filter", return_value=_event_qs(get=evt)),
             patch.object(svc.Registration, "filter", reg_filter_spy),
-            patch.object(svc.NotificationJob, "bulk_create", new=bulk_create),
+            patch.object(svc.NotificationJob, "bulk_create", new=job_bulk),
+            patch.object(svc.Notification, "bulk_create", new=note_bulk),
         ):
             await svc.cancel_event(organizer, event_id)
 
@@ -398,9 +428,9 @@ class TestCancelEvent:
             RegistrationStatus.confirmed,
             RegistrationStatus.waitlisted,
         }
-        # Exactly 2 jobs — the cancelled reg was excluded by the DB filter.
-        jobs = bulk_create.call_args[0][0]
-        assert len(jobs) == 2
+        # Exactly 2 jobs + 2 notifications — the cancelled reg was excluded.
+        assert len(job_bulk.call_args[0][0]) == 2
+        assert len(note_bulk.call_args[0][0]) == 2
 
     async def test_fan_out_no_jobs_when_no_registrations(self) -> None:
         """Cancelling an event with zero active registrations skips bulk_create."""
@@ -408,18 +438,21 @@ class TestCancelEvent:
         evt = _event(organizer_id=organizer.id, status=EventStatus.published)
         evt.save = AsyncMock()
 
-        bulk_create = AsyncMock()
+        job_bulk = AsyncMock()
+        note_bulk = AsyncMock()
         with (
             patch("hefest.services.event.in_transaction", _mock_tx()),
             patch.object(svc.Event, "filter", return_value=_event_qs(get=evt)),
             patch.object(
                 svc.Registration, "filter", return_value=_reg_list_qs(items=[])
             ),
-            patch.object(svc.NotificationJob, "bulk_create", new=bulk_create),
+            patch.object(svc.NotificationJob, "bulk_create", new=job_bulk),
+            patch.object(svc.Notification, "bulk_create", new=note_bulk),
         ):
             await svc.cancel_event(organizer, evt.id)
 
-        bulk_create.assert_not_awaited()
+        job_bulk.assert_not_awaited()
+        note_bulk.assert_not_awaited()
 
     async def test_already_cancelled_enqueues_zero_jobs(self) -> None:
         """Re-cancelling an already-cancelled event enqueues no new jobs."""
@@ -427,17 +460,20 @@ class TestCancelEvent:
         evt = _event(organizer_id=organizer.id, status=EventStatus.cancelled)
         evt.save = AsyncMock()
 
-        bulk_create = AsyncMock()
+        job_bulk = AsyncMock()
+        note_bulk = AsyncMock()
         with (
             patch("hefest.services.event.in_transaction", _mock_tx()),
             patch.object(svc.Event, "filter", return_value=_event_qs(get=evt)),
             patch.object(svc.Registration, "filter", return_value=_reg_list_qs()),
-            patch.object(svc.NotificationJob, "bulk_create", new=bulk_create),
+            patch.object(svc.NotificationJob, "bulk_create", new=job_bulk),
+            patch.object(svc.Notification, "bulk_create", new=note_bulk),
         ):
             result = await svc.cancel_event(organizer, evt.id)
 
         assert result.status == EventStatus.cancelled
-        bulk_create.assert_not_awaited()
+        job_bulk.assert_not_awaited()
+        note_bulk.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -446,12 +482,23 @@ class TestCancelEvent:
 
 
 class TestUpdateEvent:
-    def _mock_filter_chain(self, evt: Any) -> MagicMock:
-        """Build a mock for Event.filter(...).select_for_update().get_or_none()."""
-        qs = MagicMock()
-        qs.select_for_update.return_value = qs
-        qs.get_or_none = AsyncMock(return_value=evt)
-        return qs
+    def _patches(
+        self, evt: Any, regs: list[Any] | None = None
+    ) -> tuple[Any, Any, Any, Any, Any]:
+        """Return context managers for the standard update_event mock set.
+
+        ``regs`` defaults to empty so the EventUpdated fan-out short-circuits;
+        tests exercising the fan-out pass explicit registrations.
+        """
+        return (
+            patch("hefest.services.event.in_transaction", _mock_tx()),
+            patch.object(svc.Event, "filter", return_value=_event_update_qs(evt)),
+            patch.object(
+                svc.Registration, "filter", return_value=_reg_list_qs(items=regs or [])
+            ),
+            patch.object(svc.NotificationJob, "bulk_create", new=AsyncMock()),
+            patch.object(svc.Notification, "bulk_create", new=AsyncMock()),
+        )
 
     async def test_partial_update_applies_fields(self) -> None:
         organizer = _user(UserRole.organizer)
@@ -461,9 +508,8 @@ class TestUpdateEvent:
 
         data = EventUpdateRequest(title="New Title", capacity=200)
 
-        with patch.object(
-            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
-        ):
+        p1, p2, p3, p4, p5 = self._patches(evt)
+        with p1, p2, p3, p4, p5:
             await svc.update_event(organizer, evt.id, data)
 
         called_dict = evt.update_from_dict.call_args[0][0]
@@ -478,9 +524,8 @@ class TestUpdateEvent:
 
         data = EventUpdateRequest(title="Updated")
 
-        with patch.object(
-            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
-        ):
+        p1, p2, p3, p4, p5 = self._patches(evt)
+        with p1, p2, p3, p4, p5:
             await svc.update_event(organizer, evt.id, data)
 
         evt.update_from_dict.assert_called_once()
@@ -489,11 +534,9 @@ class TestUpdateEvent:
         organizer = _user(UserRole.organizer)
         evt = _event(organizer_id=uuid.uuid4(), status=EventStatus.draft)
 
-        with patch.object(
-            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
-        ):
-            with pytest.raises(HTTPException) as exc:
-                await svc.update_event(organizer, evt.id, EventUpdateRequest(title="x"))
+        p1, p2, p3, p4, p5 = self._patches(evt)
+        with p1, p2, p3, p4, p5, pytest.raises(HTTPException) as exc:
+            await svc.update_event(organizer, evt.id, EventUpdateRequest(title="x"))
 
         assert exc.value.status_code == 404
 
@@ -508,11 +551,9 @@ class TestUpdateEvent:
 
         data = EventUpdateRequest(location="New Location")
 
-        with patch.object(
-            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
-        ):
-            with pytest.raises(HTTPException) as exc:
-                await svc.update_event(organizer, evt.id, data)
+        p1, p2, p3, p4, p5 = self._patches(evt)
+        with p1, p2, p3, p4, p5, pytest.raises(HTTPException) as exc:
+            await svc.update_event(organizer, evt.id, data)
 
         assert exc.value.status_code == 409
 
@@ -528,9 +569,8 @@ class TestUpdateEvent:
         # model_fields_set must contain "ends_at" for the clear to take effect
         assert "ends_at" in data.model_fields_set
 
-        with patch.object(
-            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
-        ):
+        p1, p2, p3, p4, p5 = self._patches(evt)
+        with p1, p2, p3, p4, p5:
             await svc.update_event(organizer, evt.id, data)
 
         called_dict = evt.update_from_dict.call_args[0][0]
@@ -546,13 +586,85 @@ class TestUpdateEvent:
 
         data = EventUpdateRequest(title="Only Title")
 
-        with patch.object(
-            svc.Event, "filter", return_value=self._mock_filter_chain(evt)
-        ):
+        p1, p2, p3, p4, p5 = self._patches(evt)
+        with p1, p2, p3, p4, p5:
             await svc.update_event(organizer, evt.id, data)
 
         called_dict = evt.update_from_dict.call_args[0][0]
         assert list(called_dict.keys()) == ["title"]
+
+    async def test_visible_field_change_fans_out_updated(self) -> None:
+        """A user-visible field change enqueues EventUpdated jobs + notifications."""
+        organizer = _user(UserRole.organizer)
+        event_id = uuid.uuid4()
+        evt = _event(organizer_id=organizer.id, status=EventStatus.published)
+        evt.id = event_id
+        evt.save = AsyncMock()
+        evt.update_from_dict = MagicMock()
+
+        regs = [
+            _reg(event_id=event_id, status=RegistrationStatus.confirmed),
+            _reg(event_id=event_id, status=RegistrationStatus.waitlisted),
+        ]
+
+        job_bulk = AsyncMock()
+        note_bulk = AsyncMock()
+        with (
+            patch("hefest.services.event.in_transaction", _mock_tx()),
+            patch.object(svc.Event, "filter", return_value=_event_update_qs(evt)),
+            patch.object(
+                svc.Registration, "filter", return_value=_reg_list_qs(items=regs)
+            ),
+            patch.object(svc.NotificationJob, "bulk_create", new=job_bulk),
+            patch.object(svc.Notification, "bulk_create", new=note_bulk),
+        ):
+            await svc.update_event(
+                organizer, event_id, EventUpdateRequest(title="Renamed")
+            )
+
+        job_bulk.assert_awaited_once()
+        note_bulk.assert_awaited_once()
+        jobs = job_bulk.call_args[0][0]
+        notes = note_bulk.call_args[0][0]
+        assert len(jobs) == 2
+        assert len(notes) == 2
+        source_student_ids = {str(r.student_id) for r in regs}
+        for job in jobs:
+            assert job.event_type == "EventUpdated"
+            assert job.payload["event_id"] == str(event_id)
+            assert job.payload["student_id"] in source_student_ids
+            # occurred_at makes repeated edits idempotency-key unique
+            assert job.idempotency_key.startswith(
+                f"{job.payload['registration_id']}:EventUpdated:"
+            )
+        for note in notes:
+            assert note.notification_type == NotificationType.event_updated
+            assert note.payload["event_id"] == str(event_id)
+        assert {n.payload["student_id"] for n in notes} == source_student_ids
+
+    async def test_capacity_only_change_stays_silent(self) -> None:
+        """A capacity-only edit notifies nobody (no user-visible field changed)."""
+        organizer = _user(UserRole.organizer)
+        evt = _event(organizer_id=organizer.id, status=EventStatus.published)
+        evt.save = AsyncMock()
+        evt.update_from_dict = MagicMock()
+
+        job_bulk = AsyncMock()
+        note_bulk = AsyncMock()
+        reg_filter_spy = MagicMock(return_value=_reg_list_qs(items=[]))
+        with (
+            patch("hefest.services.event.in_transaction", _mock_tx()),
+            patch.object(svc.Event, "filter", return_value=_event_update_qs(evt)),
+            patch.object(svc.Registration, "filter", reg_filter_spy),
+            patch.object(svc.NotificationJob, "bulk_create", new=job_bulk),
+            patch.object(svc.Notification, "bulk_create", new=note_bulk),
+        ):
+            await svc.update_event(organizer, evt.id, EventUpdateRequest(capacity=300))
+
+        # No registrations were even queried, and nothing was enqueued.
+        reg_filter_spy.assert_not_called()
+        job_bulk.assert_not_awaited()
+        note_bulk.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

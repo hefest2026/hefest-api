@@ -105,9 +105,30 @@ def test_event_cancelled_subject_and_body() -> None:
     assert _STARTS in result.body
 
 
+def test_event_updated_subject_and_body() -> None:
+    result = _render("EventUpdated")
+
+    assert "Python Workshop" in result.subject
+    assert "updated" in result.subject.lower()
+    assert "Alice Smith" in result.body
+    assert "Python Workshop" in result.body
+    assert _STARTS in result.body
+    assert "Room 101" in result.body
+
+
 def test_unknown_event_type_raises_permanent_error() -> None:
     with pytest.raises(PermanentError):
         _render("UnknownType")
+
+
+def test_welcome_is_account_scoped_and_needs_no_event() -> None:
+    # Account-scoped like EmailVerify: renders with event=None and no link.
+    result = render("Welcome", cast(User, _USER), None, {})
+
+    assert "welcome" in result.subject.lower()
+    assert "Alice Smith" in result.body
+    # No event details are referenced for an account-scoped notification.
+    assert "Room 101" not in result.body
 
 
 # ---------------------------------------------------------------------------

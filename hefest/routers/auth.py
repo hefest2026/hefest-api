@@ -6,6 +6,7 @@ from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response,
 from tortoise.transactions import in_transaction
 
 from hefest.config import settings
+from hefest.models.notification import NotificationType
 from hefest.models.notification_job import NotificationJob
 from hefest.models.refresh_token import RefreshClient
 from hefest.models.user import User, UserRole
@@ -20,6 +21,7 @@ from hefest.schemas.auth import (
     VerifyEmailRequest,
 )
 from hefest.services import auth as auth_svc
+from hefest.services.notifications import notify
 
 router = APIRouter(tags=["auth"])
 
@@ -107,6 +109,25 @@ async def verify_email(
         )
     access = auth_svc.create_access_token(user)
     refresh = await auth_svc.issue_refresh_token(user, client=client)
+    # Account activation succeeded — welcome the user through the same outbox
+    # worker (email) and the in-app feed, both written in one transaction so the
+    # AFTER INSERT NOTIFY fires at COMMIT and neither can exist without the other.
+    welcome_payload = {"student_id": str(user.id)}
+    async with in_transaction("default") as conn:
+        await NotificationJob.create(
+            event=None,
+            event_type="Welcome",
+            payload=welcome_payload,
+            idempotency_key=f"{user.id}:Welcome",
+            using_db=conn,
+        )
+        await notify(
+            user_id=user.id,
+            event_id=None,
+            notification_type=NotificationType.welcome,
+            payload=welcome_payload,
+            using_db=conn,
+        )
     return _token_response(response, access, refresh, client)
 
 

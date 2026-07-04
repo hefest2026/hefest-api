@@ -7,12 +7,14 @@ from typing import cast
 from uuid import UUID
 
 from fastapi import HTTPException, status
+from tortoise import BaseDBAsyncClient
 from tortoise.expressions import Q
 from tortoise.functions import Count
 from tortoise.transactions import in_transaction
 
 from hefest.config import settings
 from hefest.models.event import Event, EventStatus
+from hefest.models.notification import Notification, NotificationType
 from hefest.models.notification_job import NotificationJob
 from hefest.models.registration import Registration, RegistrationStatus
 from hefest.models.user import User, UserRole
@@ -20,6 +22,12 @@ from hefest.schemas.event import (
     EventCreateRequest,
     EventDetailResponse,
     EventUpdateRequest,
+)
+
+# Fields whose change is user-visible enough to notify registrants. A
+# capacity-only (or description-only) edit stays silent.
+_NOTIFIABLE_UPDATE_FIELDS: frozenset[str] = frozenset(
+    {"title", "starts_at", "ends_at", "location"}
 )
 
 
@@ -169,36 +177,96 @@ async def update_event(user: User, event_id: UUID, data: EventUpdateRequest) -> 
         HTTPException 404: If the event is not found or not owned by the caller.
         HTTPException 409: If the location is being changed within 2 hours of start.
     """
-    event = await Event.filter(id=event_id).select_for_update().get_or_none()
-    if event is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
+    async with in_transaction() as conn:
+        event = (
+            await Event.filter(id=event_id)
+            .using_db(conn)
+            .select_for_update()
+            .get_or_none()
         )
-
-    _assert_owner(user, event)
-
-    update_data = data.model_dump(exclude_unset=True)
-
-    if "location" in update_data:
-        cutoff = datetime.now(UTC) + timedelta(hours=settings.event_location_lock_hours)
-        starts_at = event.starts_at
-        if starts_at.tzinfo is None:
-            starts_at = starts_at.replace(tzinfo=UTC)
-
-        if starts_at <= cutoff:
+        if event is None:
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    f"location cannot be changed within "
-                    f"{settings.event_location_lock_hours} hours of the event start"
-                ),
+                status_code=status.HTTP_404_NOT_FOUND, detail="event not found"
             )
 
-    if update_data:
-        event.update_from_dict(update_data)
-        await event.save(update_fields=list(update_data.keys()))
+        _assert_owner(user, event)
+
+        update_data = data.model_dump(exclude_unset=True)
+
+        if "location" in update_data:
+            cutoff = datetime.now(UTC) + timedelta(
+                hours=settings.event_location_lock_hours
+            )
+            starts_at = event.starts_at
+            if starts_at.tzinfo is None:
+                starts_at = starts_at.replace(tzinfo=UTC)
+
+            if starts_at <= cutoff:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"location cannot be changed within "
+                        f"{settings.event_location_lock_hours} hours of the event start"
+                    ),
+                )
+
+        if update_data:
+            event.update_from_dict(update_data)
+            await event.save(update_fields=list(update_data.keys()), using_db=conn)
+
+            if _NOTIFIABLE_UPDATE_FIELDS & update_data.keys():
+                await _fan_out_event_updated(event_id, event.title, conn)
 
     return event
+
+
+async def _fan_out_event_updated(
+    event_id: UUID, event_title: str, conn: BaseDBAsyncClient
+) -> None:
+    """Enqueue an EventUpdated outbox job + in-app notification per registrant.
+
+    Mirrors the ``cancel_event`` fan-out: one row per active (confirmed or
+    waitlisted) registration, bulk-created inside the caller's transaction so
+    the AFTER INSERT trigger fires one pg_notify for the whole batch. The
+    ``occurred_at`` timestamp makes the outbox ``idempotency_key`` unique across
+    repeated edits of the same event.
+    """
+    regs = await Registration.filter(
+        event_id=event_id,
+        status__in=[RegistrationStatus.confirmed, RegistrationStatus.waitlisted],
+    ).using_db(conn)
+    if not regs:
+        return
+
+    occurred_at = datetime.now(UTC).isoformat()
+    jobs: list[NotificationJob] = []
+    notes: list[Notification] = []
+    for reg in regs:
+        payload = {
+            "event_id": str(event_id),
+            "student_id": str(reg.student_id),
+            "registration_id": str(reg.id),
+            "event_title": event_title,
+            "occurred_at": occurred_at,
+        }
+        jobs.append(
+            NotificationJob(
+                event_id=event_id,
+                event_type="EventUpdated",
+                payload=payload,
+                idempotency_key=f"{reg.id}:EventUpdated:{occurred_at}",
+            )
+        )
+        notes.append(
+            Notification(
+                user_id=reg.student_id,
+                event_id=event_id,
+                notification_type=NotificationType.event_updated,
+                payload=payload,
+            )
+        )
+    await NotificationJob.bulk_create(jobs, using_db=conn)
+    await Notification.bulk_create(notes, using_db=conn)
 
 
 async def publish_event(user: User, event_id: UUID) -> Event:
@@ -282,22 +350,35 @@ async def cancel_event(user: User, event_id: UUID) -> Event:
         ).using_db(conn)
 
         occurred_at = datetime.now(UTC).isoformat()
-        jobs = [
-            NotificationJob(
-                event_id=event_id,
-                event_type="EventCancelled",
-                payload={
-                    "event_id": str(event_id),
-                    "student_id": str(reg.student_id),
-                    "registration_id": str(reg.id),
-                    "occurred_at": occurred_at,
-                },
-                idempotency_key=f"{reg.id}:EventCancelled",
+        jobs: list[NotificationJob] = []
+        notes: list[Notification] = []
+        for reg in regs:
+            payload = {
+                "event_id": str(event_id),
+                "student_id": str(reg.student_id),
+                "registration_id": str(reg.id),
+                "event_title": event.title,
+                "occurred_at": occurred_at,
+            }
+            jobs.append(
+                NotificationJob(
+                    event_id=event_id,
+                    event_type="EventCancelled",
+                    payload=payload,
+                    idempotency_key=f"{reg.id}:EventCancelled",
+                )
             )
-            for reg in regs
-        ]
+            notes.append(
+                Notification(
+                    user_id=reg.student_id,
+                    event_id=event_id,
+                    notification_type=NotificationType.event_cancelled,
+                    payload=payload,
+                )
+            )
         if jobs:
             await NotificationJob.bulk_create(jobs, using_db=conn)
+            await Notification.bulk_create(notes, using_db=conn)
 
     return event
 
