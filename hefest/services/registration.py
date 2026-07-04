@@ -11,6 +11,7 @@ from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
 from hefest.models.event import Event, EventStatus
+from hefest.models.notification import NotificationType
 from hefest.models.notification_job import NotificationJob
 from hefest.models.registration import Registration, RegistrationStatus
 from hefest.models.user import User
@@ -19,6 +20,7 @@ from hefest.schemas.registration import (
     RegistrationResponse,
     RegistrationSummary,
 )
+from hefest.services.notifications import notify
 
 
 async def register_student(
@@ -102,6 +104,13 @@ async def register_student(
             event_type=event_type,
             payload=payload,
             idempotency_key=f"{reg.id}:{event_type}",
+            using_db=conn,
+        )
+        await notify(
+            user_id=student.id,
+            event_id=event_id,
+            notification_type=NotificationType(event_type),
+            payload=payload,
             using_db=conn,
         )
 
@@ -204,28 +213,44 @@ async def cancel_registration(student: User, reg_id: UUID) -> Registration:
                 next_waitlisted.status = RegistrationStatus.confirmed
                 await next_waitlisted.save(update_fields=["status"], using_db=conn)
 
+                promoted_payload = {
+                    "registration_id": str(next_waitlisted.id),
+                    "event_id": str(reg.event_id),
+                    "student_id": str(next_waitlisted.student_id),
+                    "event_title": event.title,
+                }
                 await NotificationJob.create(
                     event_id=reg.event_id,
                     event_type="WaitlistPromoted",
-                    payload={
-                        "registration_id": str(next_waitlisted.id),
-                        "event_id": str(reg.event_id),
-                        "student_id": str(next_waitlisted.student_id),
-                        "event_title": event.title,
-                    },
+                    payload=promoted_payload,
                     idempotency_key=f"{next_waitlisted.id}:WaitlistPromoted",
                     using_db=conn,
                 )
+                await notify(
+                    user_id=next_waitlisted.student_id,
+                    event_id=reg.event_id,
+                    notification_type=NotificationType.waitlist_promoted,
+                    payload=promoted_payload,
+                    using_db=conn,
+                )
 
+        cancelled_payload = {
+            "registration_id": str(reg.id),
+            "event_id": str(reg.event_id),
+            "student_id": str(student.id),
+        }
         await NotificationJob.create(
             event_id=reg.event_id,
             event_type="RegistrationCancelled",
-            payload={
-                "registration_id": str(reg.id),
-                "event_id": str(reg.event_id),
-                "student_id": str(student.id),
-            },
+            payload=cancelled_payload,
             idempotency_key=f"{reg.id}:RegistrationCancelled",
+            using_db=conn,
+        )
+        await notify(
+            user_id=student.id,
+            event_id=reg.event_id,
+            notification_type=NotificationType.registration_cancelled,
+            payload=cancelled_payload,
             using_db=conn,
         )
 

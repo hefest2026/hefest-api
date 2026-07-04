@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from tortoise.exceptions import IntegrityError
 
 from hefest.models.event import EventStatus
+from hefest.models.notification import NotificationType
 from hefest.models.registration import RegistrationStatus
 from hefest.models.user import UserRole
 from hefest.services import registration as svc
@@ -125,6 +126,7 @@ class TestRegisterStudent:
         confirmed_qs = _qs(count=5)
         job_create = AsyncMock()
         reg_create = AsyncMock(return_value=reg)
+        notify_mock = AsyncMock()
 
         with (
             patch("hefest.services.registration.in_transaction", _mock_tx()),
@@ -136,6 +138,7 @@ class TestRegisterStudent:
             ),
             patch.object(svc.Registration, "create", new=reg_create),
             patch.object(svc.NotificationJob, "create", new=job_create),
+            patch.object(svc, "notify", new=notify_mock),
         ):
             result = await svc.register_student(student, event_id)
 
@@ -143,6 +146,15 @@ class TestRegisterStudent:
         assert result.waitlist_position is None
         _, job_kwargs = job_create.call_args
         assert job_kwargs["event_type"] == "RegistrationConfirmed"
+
+        # A matching in-app notification is created for the student.
+        notify_mock.assert_awaited_once()
+        note_kwargs = notify_mock.call_args.kwargs
+        assert note_kwargs["notification_type"] == (
+            NotificationType.registration_confirmed
+        )
+        assert note_kwargs["user_id"] == student.id
+        assert note_kwargs["event_id"] == event_id
 
     async def test_waitlisted_when_at_capacity(self) -> None:
         student = _user()
@@ -198,6 +210,7 @@ class TestRegisterStudent:
 
         job_create2 = AsyncMock()
         reg_create2 = AsyncMock(return_value=reg)
+        notify_mock = AsyncMock()
 
         with (
             patch("hefest.services.registration.in_transaction", _mock_tx()),
@@ -205,6 +218,7 @@ class TestRegisterStudent:
             patch.object(svc.Registration, "filter", side_effect=_pick_qs),
             patch.object(svc.Registration, "create", new=reg_create2),
             patch.object(svc.NotificationJob, "create", new=job_create2),
+            patch.object(svc, "notify", new=notify_mock),
         ):
             result = await svc.register_student(student, event_id)
 
@@ -212,6 +226,11 @@ class TestRegisterStudent:
         assert result.waitlist_position == 3  # 2 ahead + 1
         _, job_kwargs = job_create2.call_args
         assert job_kwargs["event_type"] == "RegistrationWaitlisted"
+
+        notify_mock.assert_awaited_once()
+        assert notify_mock.call_args.kwargs["notification_type"] == (
+            NotificationType.registration_waitlisted
+        )
 
     async def test_event_not_found_raises_404(self) -> None:
         student = _user()
@@ -297,11 +316,13 @@ class TestCancelRegistration:
             idx += 1
             return qs
 
+        notify_mock = AsyncMock()
         with (
             patch("hefest.services.registration.in_transaction", _mock_tx()),
             patch.object(svc.Registration, "filter", side_effect=_pick),
             patch.object(svc.Event, "filter", side_effect=_pick),
             patch.object(svc.NotificationJob, "create", new=job_create),
+            patch.object(svc, "notify", new=notify_mock),
         ):
             result = await svc.cancel_registration(student, reg.id)
 
@@ -312,6 +333,16 @@ class TestCancelRegistration:
         job_types = {call.kwargs["event_type"] for call in job_create.call_args_list}
         assert "WaitlistPromoted" in job_types
         assert "RegistrationCancelled" in job_types
+
+        # A matching notification per job: promoted student + cancelling student.
+        assert notify_mock.await_count == 2
+        note_types = {c.kwargs["notification_type"] for c in notify_mock.call_args_list}
+        assert note_types == {
+            NotificationType.waitlist_promoted,
+            NotificationType.registration_cancelled,
+        }
+        note_recipients = {c.kwargs["user_id"] for c in notify_mock.call_args_list}
+        assert note_recipients == {next_wl.student_id, student.id}
 
         # Next waitlisted is promoted
         assert next_wl.status == RegistrationStatus.confirmed
@@ -343,17 +374,26 @@ class TestCancelRegistration:
             idx += 1
             return qs
 
+        notify_mock = AsyncMock()
         with (
             patch("hefest.services.registration.in_transaction", _mock_tx()),
             patch.object(svc.Registration, "filter", side_effect=_pick),
             patch.object(svc.Event, "filter", side_effect=_pick),
             patch.object(svc.NotificationJob, "create", new=job_create),
+            patch.object(svc, "notify", new=notify_mock),
         ):
             await svc.cancel_registration(student, reg.id)
 
         # Only RegistrationCancelled — no WaitlistPromoted
         assert job_create.await_count == 1
         assert job_create.call_args.kwargs["event_type"] == "RegistrationCancelled"
+
+        # Exactly one notification, for the cancelling student.
+        notify_mock.assert_awaited_once()
+        assert notify_mock.call_args.kwargs["notification_type"] == (
+            NotificationType.registration_cancelled
+        )
+        assert notify_mock.call_args.kwargs["user_id"] == student.id
 
     async def test_already_cancelled_raises_409(self) -> None:
         student = _user()

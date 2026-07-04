@@ -21,6 +21,7 @@ from hefest.routers.device import router as device_router
 from hefest.routers.events import router as events_router
 from hefest.routers.internal import router as internal_router
 from hefest.routers.notification_jobs import router as notification_jobs_router
+from hefest.routers.notifications import router as notifications_router
 from hefest.routers.registrations import router as registrations_router
 from hefest.routers.sso import router as sso_router
 from hefest.routers.stats import router as stats_router
@@ -74,6 +75,7 @@ app.include_router(sso_router)
 app.include_router(events_router)
 app.include_router(registrations_router)
 app.include_router(notification_jobs_router)
+app.include_router(notifications_router)
 app.include_router(device_router)
 app.include_router(stats_router)
 if settings.env != "production":
